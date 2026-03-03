@@ -1,5 +1,6 @@
 from dronekit import connect, VehicleMode
 import time
+import math
 import v2v_bridge
 from pymavlink import mavutil 
 
@@ -104,15 +105,16 @@ def execute_drive(bridge, distance_m):
     time.sleep(0.5)
 
 def execute_turn(bridge, degrees):
-    """Executes a pivot turn using yaw rate."""
+    """Executes a pivot turn using yaw rate (Robust for Skid-Steer)."""
     print(f"[Ground] TURN: {degrees} degrees")
-    yaw_rate = 30 if degrees > 0 else -30
-    duration = abs(degrees) / 30.0
+    yaw_rate = 45 if degrees > 0 else -45  # Increased rate for skid-steer torque
+    duration = abs(degrees) / 45.0
     
+    # 0x05C7 (0b010111000111) -> Ignore Pos, Acc, Yaw. Active: Velocity and Yaw Rate.
     msg = vehicle.message_factory.set_position_target_local_ned_encode(
-        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000100111111111,
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0x05C7,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
-        mavutil.utils.deg_to_rad(yaw_rate))
+        math.radians(yaw_rate))
     
     start_t = time.time()
     while (time.time() - start_t) < duration:
@@ -122,7 +124,7 @@ def execute_turn(bridge, degrees):
         
     # Stop rotation
     stop_msg = vehicle.message_factory.set_position_target_local_ned_encode(
-        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0b0000100111111111,
+        0, 0, 0, mavutil.mavlink.MAV_FRAME_BODY_NED, 0x05C7,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
     vehicle.send_mavlink(stop_msg)
     time.sleep(0.5)
