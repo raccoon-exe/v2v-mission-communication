@@ -3,10 +3,8 @@ import time
 import v2v_bridge
 
 # ------------------- SET THESE PORTS -------------------
-# Since you are on Windows, check Device Manager for COM ports!
-# Example: UGV_CONTROL_PORT = "COM9"
-UGV_CONTROL_PORT = "COM9"  # UGV Flight Controller (Cube/Pixhawk)
-ESP32_BRIDGE_PORT = "COM10" # UGV ESP32 Bridge
+UGV_CONTROL_PORT = "/dev/ttyACM1"  # UGV Flight Controller (Cube/Pixhawk)
+ESP32_BRIDGE_PORT = "/dev/ttyACM0" # UGV ESP32 Bridge
 
 # ------------------- Mission params -------------------
 DIST_M = 3.048       # 10 ft
