@@ -1,7 +1,7 @@
 from pymavlink import mavutil
 import time
 import math
-from v2v_bridge import V2VBridge
+import v2v_bridge
 
 # ------------------- SET THESE PORTS -------------------
 CONNECTION_STRING = "/dev/ttyACM0" 
@@ -23,7 +23,7 @@ master.wait_heartbeat()
 print("[Mission 2] Heartbeat found. Optical Flow/Lidar Ready.")
 
 # Initialize V2V Bridge
-bridge = V2VBridge(ESP32_PORT, name="UAV-Bridge")
+bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge")
 bridge.connect()
 
 # ------------------- Mavlink Helpers (mavutil style) -------------------

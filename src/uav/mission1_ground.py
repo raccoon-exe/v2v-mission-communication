@@ -1,80 +1,47 @@
-from pymavlink import mavutil
 import time
-import math
-from v2v_bridge import V2VBridge
+import v2v_bridge
 
 # ------------------- SET THESE PORTS -------------------
-# If using SITL, change to "udp:127.0.0.1:14551"
-# If using Airliner/Hardware on Jetson, set to his COM/USB port
-CONNECTION_STRING = "/dev/ttyACM0" 
-BAUD_RATE = 115200
+# Since you are on Windows, check Device Manager for COM ports!
+# Example: ESP32_PORT = "COM16"
+ESP32_PORT = "COM16" 
 
-# UAV ESP32 Bridge Port
-ESP32_PORT = "/dev/ttyACM1"
-
-# ------------------- Connect -------------------
-print(f"[Mission 1] Connecting to {CONNECTION_STRING}...")
-master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
-master.wait_heartbeat()
-print("[Mission 1] Heartbeat found")
-
-# Initialize V2V Bridge
-bridge = V2VBridge(ESP32_PORT, name="UAV-Bridge")
-bridge.connect()
-
-# ------------------- Mavlink Helpers (mavutil style) -------------------
-
-def change_mode(mode: str):
-    mapping = master.mode_mapping()
-    if mode not in mapping:
-        print(f"Unknown mode '{mode}'")
-        return
-    mode_id = mapping[mode]
-    master.mav.set_mode_send(master.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode_id)
-    print(f"Mode: {mode}")
-
-def arm_drone():
-    master.mav.command_long_send(master.target_system, master.target_component,
-                                 mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 
-                                 0, 0, 0, 0, 0, 0)
-    print("Arming props (GROUND ONLY)...")
-
-def disarm_drone():
-    master.mav.command_long_send(master.target_system, master.target_component,
-                                 mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 
-                                 0, 0, 0, 0, 0, 0)
-    print("Disarming.")
-
-# ------------------- MAIN MISSION 1: GROUND TEST -------------------
+# ------------------- Start Bridge -------------------
 def main():
+    print(f"[Mission 1] Starting V2V Bridge on {ESP32_PORT}...")
+    
+    # 1. Start the Communication Bridge!
+    # We don't need the Cube Orange for this Ground Test.
+    bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge")
     try:
-        # 1. Prep
-        change_mode("GUIDED")
-        time.sleep(1)
-        
-        # 2. Arm (Spinning props on ground)
-        arm_drone()
-        time.sleep(2)
-        
-        # 3. COORDINATED ACTION: Tell UGV to move!
-        print("[Mission] Commanding UGV to MOVE 10ft while Drone is ARMED on ground")
-        bridge.send_command(cmdSeq=1, cmd=v2v_bridge.CMD_MOVE_FORWARD, estop=0) 
+        bridge.connect()
+    except Exception as e:
+        print(f"!!! Error connecting to ESP32: {e} !!!")
+        print("Make sure your ESP32 is plugged in and the COM port is correct in the script.")
+        return
 
-        # 4. Simulation of "Moving" time (staying armed for 5 seconds)
-        print("[Mission] Simulation: Drone is staying armed for the UGV's move...")
-        for i in range(50): # 5 seconds
-            # Update telemetry even while on ground
+    print("[Mission 1] Bridge Started. Sending 'MOVE' command to UGV...")
+
+    # 2. COORDINATED ACTION: Tell UGV to move!
+    # We send it a few times to make sure it gets through the radio link
+    for i in range(5):
+        print(f"Sending Command {i+1}/5...")
+        bridge.send_command(cmdSeq=i+1, cmd=v2v_bridge.CMD_MOVE_FORWARD, estop=0) 
+        time.sleep(0.5)
+
+    print("[Mission 1] Command Sent. You can check the UGV Pi now.")
+    
+    # 3. Keep sending heartbeat telemetry so the ground side sees us 'Live'
+    print("Press Ctrl+C to stop heartbeats.")
+    telem_seq = 0
+    try:
+        while True:
             t_ms = int(time.time() * 1000) & 0xFFFFFFFF
-            bridge.send_telemetry(i, t_ms, 0.0, 0.0, 0, 0)
-            time.sleep(0.1)
-
-        # 5. Clean up
-        print("[Mission] Test Complete.")
-        disarm_drone()
-
+            bridge.send_telemetry(telem_seq, t_ms, 0.0, 0.0, 0, 0)
+            telem_seq += 1
+            time.sleep(1.0)
     except KeyboardInterrupt:
-        print("Stopping Mission 1...")
-        disarm_drone()
+        print("Stopping Mission 1.")
     finally:
         bridge.stop()
 
