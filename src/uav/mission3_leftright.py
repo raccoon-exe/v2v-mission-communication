@@ -2,17 +2,23 @@ from pymavlink import mavutil
 import time
 import v2v_bridge
 
-# ------------------- SET THESE PORTS -------------------
-CONNECTION_STRING = "/dev/ttyACM0" 
-BAUD_RATE = 115200
-ESP32_PORT = "/dev/ttyUSB0"
+# UAV MISSION 3 SCRIPT 🚁
+# This is the "Brain" script. It tells the ground vehicle
+# to do a 5-stage zig-zag maneuver.
+
+################################# config stuff
+# where the flight controller and radio are plugged in
+CONNECTION_STRING = "/dev/ttyACM0"   # UAV Flight Controller
+BAUD_RATE = 115200                   
+ESP32_PORT = "/dev/ttyUSB0"          # The radio bridge
 
 def main():
     print("==========================================")
     print("   UAV MISSION 3 - ZIG-ZAG MANEUVERS")
     print("==========================================")
     
-    print(f"[Mission 3] Connecting to UAV Controller at {CONNECTION_STRING}...")
+    # tie into the drones flight controller
+    print(f"[Mission 3] Tying into Drone at {CONNECTION_STRING}...")
     try:
         master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
         master.wait_heartbeat()
@@ -21,7 +27,8 @@ def main():
         print(f"!!! Error connecting to Drone: {e} !!!")
         master = None
 
-    print(f"[Mission 3] Starting V2V Bridge on {ESP32_PORT}...")
+    # start the radio bridge (v2v_bridge.py)
+    print(f"[Mission 3] Starting Radio Bridge on {ESP32_PORT}...")
     bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge")
     try:
         bridge.connect()
@@ -31,6 +38,7 @@ def main():
         return
 
     def broadcast_uav_status():
+        # tells the ground vehicle if the drone is armed or not
         armed_val = 0
         if master:
             msg = master.recv_match(type='HEARTBEAT', blocking=False)
@@ -39,7 +47,10 @@ def main():
         t_ms = int(time.time() * 1000) & 0xFFFFFFFF
         bridge.send_telemetry(0, t_ms, 0.0, 0.0, armed_val, 0)
 
+    ############################ Mission Logic
+
     try:
+        # 1. wait for the ground vehicle to yell status back
         print("[Mission 3] Waiting for UGV Sync...")
         ugv_ready = False
         while not ugv_ready:
@@ -53,7 +64,8 @@ def main():
             broadcast_uav_status()
             time.sleep(1.0)
 
-        # 2. COORDINATED SEQUENCE
+        # 2. THE ZIG-ZAG SEQUENCE
+        # this is the list of chores the ground robot has to do
         print("\n[Mission 3] >>> INITIATING ZIG-ZAG MANEUVERS")
         
         sequence = [
@@ -66,12 +78,14 @@ def main():
         
         for i, (cmd, desc) in enumerate(sequence):
             print(f"\n[Mission 3] Task {i+1}/5: {desc}")
+            # SHOUT the command at the bridge (Packs it via v2v_bridge.py)
             bridge.send_command(cmdSeq=300+i, cmd=cmd, estop=0)
             
-            # Tracking duration (Extended for reliable completion)
+            # sit here and wait for the wheel robot to finish
             wait_time = 4.0 if "DRIVE" in desc else 6.0
             start_segment = time.time()
             while (time.time() - start_segment) < wait_time:
+                # catch speed telemetry data from the radio
                 data = bridge.get_telemetry()
                 if data:
                     v_mps = data[2]

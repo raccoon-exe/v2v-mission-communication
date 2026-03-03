@@ -2,16 +2,22 @@ from pymavlink import mavutil
 import time
 import v2v_bridge
 
-# ------------------- SET THESE PORTS -------------------
-CONNECTION_STRING = "/dev/ttyACM0" 
+# UAV MISSION 4 SCRIPT 🚁
+# This is the "Brain" script. It tells the ground vehicle
+# to make a full circle twice.
+
+################################# config stuff
+# where the fly controller and radio are plugged in
+CONNECTION_STRING = "/dev/ttyACM0"   # UAV Flight Controller
 BAUD_RATE = 115200
-ESP32_PORT = "/dev/ttyUSB0"
+ESP32_PORT = "/dev/ttyUSB0"          # The radio bridge
 
 def main():
     print("==========================================")
     print("   UAV MISSION 4 - CIRCLE MANEUVERS")
     print("==========================================")
     
+    # tie into the drones flight controller
     print(f"[Mission 4] Connecting to UAV Controller at {CONNECTION_STRING}...")
     try:
         master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
@@ -21,6 +27,7 @@ def main():
         print(f"!!! Error connecting to Drone: {e} !!!")
         master = None
 
+    # start the bridge link (v2v_bridge.py)
     print(f"[Mission 4] Starting V2V Bridge on {ESP32_PORT}...")
     bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge")
     try:
@@ -31,6 +38,7 @@ def main():
         return
 
     def broadcast_uav_status():
+        # shoves drone arm status into the radio telemetry link
         armed_val = 0
         if master:
             msg = master.recv_match(type='HEARTBEAT', blocking=False)
@@ -39,7 +47,10 @@ def main():
         t_ms = int(time.time() * 1000) & 0xFFFFFFFF
         bridge.send_telemetry(0, t_ms, 0.0, 0.0, armed_val, 0)
 
+    ############################ Mission Logic
+
     try:
+        # 1. wait for the wheel robot to stop being a ghost and sync up
         print("[Mission 4] Waiting for UGV Sync...")
         ugv_ready = False
         while not ugv_ready:
@@ -52,18 +63,18 @@ def main():
             broadcast_uav_status()
             time.sleep(1.0)
 
-        # 2. COORDINATED SEQUENCE
+        # 2. THE CIRCLE MISSION
         print("\n[Mission 4] >>> INITIATING DOUBLE CIRCLE (2x360)")
         
-        # Trigger Circle Command
-        # 1.0 m/s and 45 deg/s = 8s per circle. 2 circles = 16s.
+        # Shout the CIRCLE command at the bridge
         bridge.send_command(cmdSeq=400, cmd=v2v_bridge.CMD_CIRCLE, estop=0)
         
         start_mission = time.time()
-        # Wait for 2 circles (16s) + buffer (2s)
+        # duration for 2 laps
         total_duration = 18.0
         
         while (time.time() - start_mission) < total_duration:
+            # grab speed status coming back from the radio while it spins
             data = bridge.get_telemetry()
             if data:
                 v_mps = data[2]
