@@ -56,26 +56,35 @@ def arm_and_move(bridge):
         broadcast_status(bridge, 0)
         time.sleep(0.1)
     
-    # --- SEQUENCE: ARM -> DISARM -> ARM ---
+    # --- FORCED SEQUENCE: ARM -> DISARM -> ARM ---
     
     for attempt in ["FIRST ARM", "RESET DISARM", "FINAL ARM"]:
         state = True if "ARM" in attempt else False
-        print(f"  [SYNC] {attempt}...")
-        vehicle.armed = state
+        print(f"  [FORCE-SYNC] Initiating {attempt}...")
         
-        # Wait for hardware to reflect the state
-        timeout = time.time() + 5
-        while vehicle.armed != state:
-            if time.time() > timeout:
-                print(f"    !!! Timeout during {attempt} !!!")
+        # Try to force the state up to 3 times per stage
+        for retry in range(3):
+            print(f"    - Attempt {retry+1}/3: Setting vehicle.armed to {state}")
+            vehicle.armed = state
+            
+            # Wait up to 3s for confirmation
+            timeout = time.time() + 3
+            while vehicle.armed != state:
+                if time.time() > timeout:
+                    break
+                broadcast_status(bridge, 0)
+                time.sleep(0.1)
+            
+            if vehicle.armed == state:
+                print(f"    - Success: Vehicle is now {'Armed' if state else 'Disarmed'}")
                 break
-            broadcast_status(bridge, 0)
-            time.sleep(0.1)
+            else:
+                print(f"    - Hardware unresponsive, retrying...")
         
-        time.sleep(1.0) # Small pause between states
+        time.sleep(1.0) # Pause between stages for the FCU to breathe
 
     if not vehicle.armed:
-        print("!!! [ERROR] Final Arm failed. Aborting Move. !!!")
+        print("!!! [CRITICAL] UGV failed to reach FINAL ARM. Move aborted. !!!")
         return
 
     print("************************************")

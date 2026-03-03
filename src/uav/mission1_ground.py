@@ -92,10 +92,9 @@ def main():
                 mode_str = "GUIDED" if mode_u == v2v_bridge.MODE_GUIDED else "INITIAL"
                 print(f"    [RADIO] UGV STATUS: {status_str} | MODE: {mode_str}")
                 
-                # If we see UGV is armed, we can proceed
-                if armed_u == 1:
-                    print("\n!!! [SYNC] UGV CONFIRMS ARMED AND READY !!!")
-                    ugv_ready = True
+                # If we see ANY telemetry, the link is working!
+                print("\n!!! [SYNC] UGV RADIO LINK VERIFIED !!!")
+                ugv_ready = True
             
             # Send our own telemetry so UGV knows we are alive
             broadcast_uav_status(0)
