@@ -8,6 +8,13 @@ SOF = 0xAA
 TYPE_TELEM = 1
 TYPE_CMD = 2
 
+# -------------------- COMMAND CODES --------------------
+CMD_ARM          = 1
+CMD_DISARM       = 2
+CMD_TAKEOFF      = 3
+CMD_LAND         = 4
+CMD_MOVE_FORWARD = 5
+
 TELEM_FMT = "<IIffBB"  # 18 bytes
 CMD_FMT   = "<IBB"     # 6 bytes
 

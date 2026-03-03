@@ -58,7 +58,7 @@ def main():
         
         # 3. COORDINATED ACTION: Tell UGV to move!
         print("[Mission] Commanding UGV to MOVE 10ft while Drone is ARMED on ground")
-        bridge.send_command(cmdSeq=1, cmd=5, estop=0) 
+        bridge.send_command(cmdSeq=1, cmd=v2v_bridge.CMD_MOVE_FORWARD, estop=0) 
 
         # 4. Simulation of "Moving" time (staying armed for 5 seconds)
         print("[Mission] Simulation: Drone is staying armed for the UGV's move...")

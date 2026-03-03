@@ -35,8 +35,8 @@ typedef struct __attribute__((packed)) {
 // Command: what the ground sends to UAV (6 bytes total)
 typedef struct __attribute__((packed)) {
   uint32_t cmdSeq; // command sequence number
-  uint8_t cmd;     // command code (1=arm, 2=land, etc)
-  uint8_t estop;   // 1 to force LAND, 0 otherwise
+  uint8_t  cmd;    // 1:ARM, 2:DISARM, 3:TAKEOFF, 4:LAND, 5:MOVE
+  uint8_t  estop;  // 1 to force LAND, 0 otherwise
 } CommandPayload;
 
 // -------------------- QUEUES (Mailboxes) --------------------

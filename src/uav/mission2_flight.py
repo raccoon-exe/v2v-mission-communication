@@ -79,7 +79,7 @@ def main():
 
         # 2. COORDINATED ACTION: Tell UGV to move!
         print("[Mission] Commanding UGV to MOVE 10ft")
-        bridge.send_command(cmdSeq=1, cmd=5, estop=0) 
+        bridge.send_command(cmdSeq=1, cmd=v2v_bridge.CMD_MOVE_FORWARD, estop=0) 
 
         # 3. Flight Move
         print(f"[Mission] Flying {DIST_M}m forward...")
