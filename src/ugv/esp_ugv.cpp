@@ -46,6 +46,7 @@ static QueueHandle_t qCmdToSerial   = nullptr; // Radio (from Air) -> forward to
 static QueueHandle_t qMsgToSerial   = nullptr; // Radio (from Air) -> forward to Pi
 static QueueHandle_t qTelemToNow    = nullptr; // Pi (USB) -> send out over Radio (to UAV)
 static QueueHandle_t qCmdToNow      = nullptr; // Pi (USB) -> send to Radio
+static QueueHandle_t qMsgToNow      = nullptr; // Pi (USB) -> send to Radio (Strings)
 
 // -------------------- MUTEX (Safety Lock) --------------------
 static SemaphoreHandle_t serialMutex = nullptr; // prevents scrambled USB data
@@ -78,29 +79,37 @@ static void serial_send_frame(uint8_t type, const uint8_t* payload, uint8_t len)
 // -------------------- ESP-NOW Radio Callback --------------------
 
 // this runs automatically when a radio packet arrives from the UAV
-void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
-  // Catching Telemetry
-  if (len == (1 + (int)sizeof(TelemetryPayload))) {
-    if (data[0] == TYPE_TELEM) {
-      TelemetryPayload t;
-      memcpy(&t, data + 1, sizeof(t));
-      if (qTelemToSerial) xQueueSend(qTelemToSerial, &t, 0);
-    }
+static void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
+  if (len < 1) return;
+  uint8_t fType = data[0];
+
+  // 1. Radio Echo (Debug): Tell the RPi we got SOMETHING
+  char dbg[64];
+  snprintf(dbg, 64, "ESP: Got Radio PKT type %d len %d", fType, len);
+  if (qMsgToSerial) {
+    uint8_t dBuf[64];
+    memset(dBuf, 0, 64);
+    memcpy(dBuf, dbg, strlen(dbg));
+    xQueueSend(qMsgToSerial, dBuf, 0);
   }
-  // Catching Commands coming FROM THE AIR (Jetson mission)
-  else if (len == (1 + (int)sizeof(CommandPayload))) {
-    if (data[0] == TYPE_CMD) {
-      CommandPayload cmd;
-      memcpy(&cmd, data + 1, sizeof(cmd));
-      if (qCmdToSerial) xQueueSend(qCmdToSerial, &cmd, 0);
-    }
+
+  // 2. Catching Telemetry
+  if (fType == TYPE_TELEM && len >= (int)sizeof(TelemetryPayload)) {
+    TelemetryPayload t;
+    memcpy(&t, data + 1, sizeof(t));
+    if (qTelemToSerial) xQueueSend(qTelemToSerial, &t, 0);
   }
-  // Catching Messages from the UAV
-  else if (data[0] == TYPE_MSG) {
+  // 3. Catching Commands coming FROM THE AIR (Jetson mission)
+  else if (fType == TYPE_CMD && len >= (int)sizeof(CommandPayload)) {
+    CommandPayload cmd;
+    memcpy(&cmd, data + 1, sizeof(cmd));
+    if (qCmdToSerial) xQueueSend(qCmdToSerial, &cmd, 0);
+  }
+  // 4. Catching Messages from the UAV
+  else if (fType == TYPE_MSG) {
       uint8_t payload[64];
       memset(payload, 0, 64);
-      uint8_t msgLen = len - 1;
-      if (msgLen > 64) msgLen = 64;
+      uint8_t msgLen = (len - 1 > 64) ? 64 : len - 1;
       memcpy(payload, data+1, msgLen);
       if (qMsgToSerial) xQueueSend(qMsgToSerial, payload, 0);
   }
@@ -223,6 +232,12 @@ void serialRxTask(void* pv) {
           memcpy(&t, payload, sizeof(t));
           if (qTelemToNow) xQueueSend(qTelemToNow, &t, 0);
         }
+        else if (type == TYPE_MSG) {
+          uint8_t msgBuf[64];
+          memset(msgBuf, 0, 64);
+          memcpy(msgBuf, payload, len);
+          if (qMsgToNow) xQueueSend(qMsgToNow, msgBuf, 0);
+        }
       }
     }
     vTaskDelay(pdMS_TO_TICKS(5)); // rest a bit to be nice to CPU
@@ -248,15 +263,37 @@ void radioTxTelemTask(void* pv) {
 void espNowTxTask(void* pv) {
   (void)pv;
   CommandPayload c;
-  uint8_t pkt[1 + sizeof(CommandPayload)];
-  pkt[0] = TYPE_CMD;
+  TelemetryPayload t;
+  uint8_t m[64];
+  
+  uint8_t pktCmd[1 + sizeof(CommandPayload)];
+  pktCmd[0] = TYPE_CMD;
+  uint8_t pktTelem[1 + sizeof(TelemetryPayload)];
+  pktTelem[0] = TYPE_TELEM;
+  uint8_t pktMsg[1 + 64];
+  pktMsg[0] = TYPE_MSG;
 
   for (;;) {
-    // wait for serialRxTask to drop a command here
-    if (xQueueReceive(qCmdToNow, &c, portMAX_DELAY) == pdTRUE) {
-      memcpy(pkt + 1, &c, sizeof(c));
-      esp_now_send(UAV_MAC, pkt, sizeof(pkt));
+    // 1. Check for commands (to Air)
+    if (xQueueReceive(qCmdToNow, &c, 0) == pdTRUE) {
+      memcpy(pktCmd + 1, &c, sizeof(c));
+      esp_now_send(UAV_MAC, pktCmd, sizeof(pktCmd));
     }
+    // 2. Check for telemetry (to Air)
+    if (xQueueReceive(qTelemToNow, &t, 0) == pdTRUE) {
+      memcpy(pktTelem + 1, &t, sizeof(t));
+      esp_now_send(UAV_MAC, pktTelem, sizeof(pktTelem));
+    }
+    // 3. Check for string messages (to Air)
+    if (xQueueReceive(qMsgToNow, m, 0) == pdTRUE) {
+      uint8_t mLen = 0;
+      while (mLen < 64 && m[mLen] != 0) mLen++;
+      if (mLen > 0) {
+        memcpy(pktMsg + 1, m, mLen);
+        esp_now_send(UAV_MAC, pktMsg, 1 + mLen);
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
 
@@ -289,13 +326,13 @@ void setup() {
   qMsgToSerial   = xQueueCreate(10, 64);
   qTelemToNow    = xQueueCreate(10, sizeof(TelemetryPayload));
   qCmdToNow      = xQueueCreate(10, sizeof(CommandPayload));
+  qMsgToNow      = xQueueCreate(10, 64);
 
   // Hire the Workers (Tasks)
   xTaskCreate(serialTxTelemTask, "TxTelem", 4096, NULL, 2, NULL);
   xTaskCreate(serialTxCmdTask,   "TxCmd",   4096, NULL, 2, NULL);
   xTaskCreate(serialTxMsgTask,   "TxMsg",   4096, NULL, 2, NULL);
   xTaskCreate(serialRxTask,      "SerRx",   4096, NULL, 2, NULL);
-  xTaskCreate(radioTxTelemTask,  "RadTelem",4096, NULL, 2, NULL);
   xTaskCreate(espNowTxTask,      "NowTx",   4096, NULL, 2, NULL);
 
   Serial.println("====================================");

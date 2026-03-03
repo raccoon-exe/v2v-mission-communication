@@ -5,7 +5,7 @@ import v2v_bridge
 # ------------------- SET THESE PORTS -------------------
 CONNECTION_STRING = "/dev/ttyACM0" 
 BAUD_RATE = 115200
-ESP32_PORT = "/dev/ttyACM1"
+ESP32_PORT = "/dev/ttyUSB0"
 
 # ------------------- Connect -------------------
 def main():
@@ -79,7 +79,12 @@ def main():
         timeout_start = time.time()
         
         while not ugv_ready:
-            # Check for Telemetry FROM the UGV
+            # 1. READ DEBUG MESSAGES (Echoes from the ESP32)
+            msg = bridge.get_message()
+            if msg:
+                print(f"    >>> [RADIO MSG]: {msg}")
+
+            # 2. Check for Telemetry FROM the UGV
             data = bridge.get_telemetry()
             if data:
                 seq_u, t_ms_u, vx_u, vy_u, armed_u, mode_u = data

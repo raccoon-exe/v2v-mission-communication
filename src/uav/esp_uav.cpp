@@ -46,8 +46,10 @@ static QueueHandle_t qMsgToNow    = nullptr; // Jetson (USB) -> send out over Ra
 static QueueHandle_t qCmdToNow    = nullptr; // Jetson (USB) -> send out over Radio (to UGV)
 static QueueHandle_t qTelemToSerial = nullptr; // Incoming Radio (UGV status) -> forward to Jetson
 static QueueHandle_t qCmdToSerial = nullptr; // Incoming Radio -> forward to Jetson (USB)
+static QueueHandle_t qMsgToSerial = nullptr; // Incoming Radio (Strings) -> forward to Jetson
 
-// -------------------- Helpers (Security Guard) --------------------
+// -------------------- MUTEX (Safety Lock) --------------------
+static SemaphoreHandle_t serialMutex = nullptr; // prevents scrambled USB data
 
 // basically this will calculate a XOR Checksum (fingerprint)
 // it combines everything into one 8 bit number to prove data is clean
@@ -60,11 +62,14 @@ static uint8_t checksum_xor(uint8_t type, uint8_t len, const uint8_t* payload) {
 // this function wraps data in a "Protocol Frame" for serial
 static void serial_send_frame(uint8_t type, const uint8_t* payload, uint8_t len) {
   uint8_t chk = checksum_xor(type, len, payload);
-  Serial.write(SOF);      // 1. send "Hello" byte
-  Serial.write(type);     // 2. send type
-  Serial.write(len);      // 3. send length
-  if (len) Serial.write(payload, len); // 4. send data
-  Serial.write(chk);      // 5. send signature
+  if (xSemaphoreTake(serialMutex, portMAX_DELAY) == pdTRUE) {
+    Serial.write(SOF);      // 1. send "Hello" byte
+    Serial.write(type);     // 2. send type
+    Serial.write(len);      // 3. send length
+    if (len) Serial.write(payload, len); // 4. send data
+    Serial.write(chk);      // 5. send signature
+    xSemaphoreGive(serialMutex);
+  }
 }
 
 // -------------------- ESP-NOW Radio Callback --------------------
@@ -72,21 +77,38 @@ static void serial_send_frame(uint8_t type, const uint8_t* payload, uint8_t len)
 // this runs automatically whenever a radio packet hits the UAV's antenna
 // currently used for Emergency LAND commands coming FROM the Ground
 static void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
-  // 1. Catching Telemetry from UGV
-  if (len == (1 + (int)sizeof(TelemetryPayload))) {
-    if (data[0] == TYPE_TELEM) {
-      TelemetryPayload t;
-      memcpy(&t, data + 1, sizeof(t));
-      if (qTelemToSerial) xQueueSend(qTelemToSerial, &t, 0);
-    }
+  if (len < 1) return;
+  uint8_t fType = data[0];
+
+  // 1. Radio Echo (Debug): Tell the Jetson we got SOMETHING
+  char dbg[64];
+  snprintf(dbg, 64, "ESP: Got Radio PKT type %d len %d", fType, len);
+  if (qMsgToSerial) {
+    uint8_t dBuf[64];
+    memset(dBuf, 0, 64);
+    memcpy(dBuf, dbg, strlen(dbg));
+    xQueueSend(qMsgToSerial, dBuf, 0);
   }
-  // 2. Catching Commands (E-Stop/Abort from Ground)
-  else if (len == (1 + (int)sizeof(CommandPayload))) {
-    if (data[0] == TYPE_CMD) {
-      CommandPayload cmd;
-      memcpy(&cmd, data + 1, sizeof(cmd));
-      if (qCmdToSerial) xQueueSend(qCmdToSerial, &cmd, 0);
-    }
+
+  // 2. Catching Telemetry from UGV
+  if (fType == TYPE_TELEM && len >= (int)sizeof(TelemetryPayload)) {
+    TelemetryPayload t;
+    memcpy(&t, data + 1, sizeof(t));
+    if (qTelemToSerial) xQueueSend(qTelemToSerial, &t, 0);
+  }
+  // 3. Catching Commands (E-Stop/Abort from Ground)
+  else if (fType == TYPE_CMD && len >= (int)sizeof(CommandPayload)) {
+    CommandPayload cmd;
+    memcpy(&cmd, data + 1, sizeof(cmd));
+    if (qCmdToSerial) xQueueSend(qCmdToSerial, &cmd, 0);
+  }
+  // 4. Catching Messages (Reverse Hello)
+  else if (fType == TYPE_MSG) {
+    uint8_t msgBuf[64];
+    memset(msgBuf, 0, 64);
+    uint8_t msgLen = (len - 1 > 64) ? 64 : len - 1;
+    memcpy(msgBuf, data + 1, msgLen);
+    if (qMsgToSerial) xQueueSend(qMsgToSerial, msgBuf, 0);
   }
 }
 
@@ -231,19 +253,25 @@ void radioTxMsgTask(void* pv) {
   }
 }
 
-// Worker 5: Forwards Radio-Data (Commands/Telem) to Jetson (USB)
 void serialTxTask(void* pv) {
   (void)pv;
   CommandPayload c;
   TelemetryPayload t;
+  uint8_t m[64];
   for (;;) {
-    // 1. Check for incoming commands
+    // 1. Check for incoming commands (Forward to Jetson)
     if (xQueueReceive(qCmdToSerial, &c, 0) == pdTRUE) {
       serial_send_frame(TYPE_CMD, (const uint8_t*)&c, (uint8_t)sizeof(c));
     }
-    // 2. Check for incoming telemetry (UGV status)
+    // 2. Check for incoming telemetry (Forward to Jetson)
     if (xQueueReceive(qTelemToSerial, &t, 0) == pdTRUE) {
       serial_send_frame(TYPE_TELEM, (const uint8_t*)&t, (uint8_t)sizeof(t));
+    }
+    // 3. Check for incoming debug/messages (Forward to Jetson)
+    if (xQueueReceive(qMsgToSerial, m, 0) == pdTRUE) {
+      uint8_t len = 0;
+      while (len < 64 && m[len] != 0) len++;
+      if (len > 0) serial_send_frame(TYPE_MSG, m, len);
     }
     vTaskDelay(pdMS_TO_TICKS(5));
   }
@@ -266,11 +294,14 @@ void setup() {
   peer.encrypt = false;
   esp_now_add_peer(&peer);
 
+  serialMutex = xSemaphoreCreateMutex();
+
   qTelemToNow  = xQueueCreate(10, sizeof(TelemetryPayload));
   qCmdToNow    = xQueueCreate(10, sizeof(CommandPayload));
   qMsgToNow    = xQueueCreate(10, 64);
   qTelemToSerial = xQueueCreate(10, sizeof(TelemetryPayload));
   qCmdToSerial = xQueueCreate(10, sizeof(CommandPayload));
+  qMsgToSerial = xQueueCreate(10, 64);
 
   // Hiring the Workers
   xTaskCreate(serialRxTask,      "SerRx",   4096, nullptr, 2, nullptr);

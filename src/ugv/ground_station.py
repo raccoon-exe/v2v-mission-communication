@@ -112,6 +112,9 @@ def main():
     bridge = v2v_bridge.V2VBridge(ESP32_BRIDGE_PORT, name="Ground-Station")
     try:
         bridge.connect()
+        # --- REVERSE HELLO (Debug) ---
+        print("[Ground] Sending Hello to Air...")
+        bridge.send_message("hi flying rat . we connected")
     except Exception as e:
         print(f"!!! Bridge Serial Error: {e} !!!")
         return
