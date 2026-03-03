@@ -42,8 +42,9 @@ typedef struct __attribute__((packed)) {
 
 // -------------------- Queues (Mailboxes) --------------------
 static QueueHandle_t qTelemToNow  = nullptr; // Jetson (USB) -> send out over Radio
+static QueueHandle_t qMsgToNow    = nullptr; // Jetson (USB) -> send out over Radio
 static QueueHandle_t qCmdToNow    = nullptr; // Jetson (USB) -> send out over Radio (to UGV)
-static QueueHandle_t qMsgToNow    = nullptr; // Jetson (USB) -> send out over Radio (Hello messages)
+static QueueHandle_t qTelemToSerial = nullptr; // Incoming Radio (UGV status) -> forward to Jetson
 static QueueHandle_t qCmdToSerial = nullptr; // Incoming Radio -> forward to Jetson (USB)
 
 // -------------------- Helpers (Security Guard) --------------------
@@ -71,8 +72,16 @@ static void serial_send_frame(uint8_t type, const uint8_t* payload, uint8_t len)
 // this runs automatically whenever a radio packet hits the UAV's antenna
 // currently used for Emergency LAND commands coming FROM the Ground
 static void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
-  // m checking if size matches Type + Command struct
-  if (len == (1 + (int)sizeof(CommandPayload))) {
+  // 1. Catching Telemetry from UGV
+  if (len == (1 + (int)sizeof(TelemetryPayload))) {
+    if (data[0] == TYPE_TELEM) {
+      TelemetryPayload t;
+      memcpy(&t, data + 1, sizeof(t));
+      if (qTelemToSerial) xQueueSend(qTelemToSerial, &t, 0);
+    }
+  }
+  // 2. Catching Commands (E-Stop/Abort from Ground)
+  else if (len == (1 + (int)sizeof(CommandPayload))) {
     if (data[0] == TYPE_CMD) {
       CommandPayload cmd;
       memcpy(&cmd, data + 1, sizeof(cmd));
@@ -222,14 +231,21 @@ void radioTxMsgTask(void* pv) {
   }
 }
 
-// Worker 5: Forwards Radio-Commands to Jetson (USB)
+// Worker 5: Forwards Radio-Data (Commands/Telem) to Jetson (USB)
 void serialTxTask(void* pv) {
   (void)pv;
   CommandPayload c;
+  TelemetryPayload t;
   for (;;) {
-    if (xQueueReceive(qCmdToSerial, &c, portMAX_DELAY) == pdTRUE) {
+    // 1. Check for incoming commands
+    if (xQueueReceive(qCmdToSerial, &c, 0) == pdTRUE) {
       serial_send_frame(TYPE_CMD, (const uint8_t*)&c, (uint8_t)sizeof(c));
     }
+    // 2. Check for incoming telemetry (UGV status)
+    if (xQueueReceive(qTelemToSerial, &t, 0) == pdTRUE) {
+      serial_send_frame(TYPE_TELEM, (const uint8_t*)&t, (uint8_t)sizeof(t));
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
 
@@ -253,6 +269,7 @@ void setup() {
   qTelemToNow  = xQueueCreate(10, sizeof(TelemetryPayload));
   qCmdToNow    = xQueueCreate(10, sizeof(CommandPayload));
   qMsgToNow    = xQueueCreate(10, 64);
+  qTelemToSerial = xQueueCreate(10, sizeof(TelemetryPayload));
   qCmdToSerial = xQueueCreate(10, sizeof(CommandPayload));
 
   // Hiring the Workers
@@ -262,7 +279,10 @@ void setup() {
   xTaskCreate(radioTxMsgTask,    "RadMsg",  4096, nullptr, 2, nullptr);
   xTaskCreate(serialTxTask,      "SerTx",   4096, nullptr, 1, nullptr);
 
-  Serial.println("UAV Bridge Ready!");
+  Serial.println("====================================");
+  Serial.print("UAV Bridge Ready! MAC: ");
+  Serial.println(WiFi.macAddress());
+  Serial.println("====================================");
 }
 
 void loop() {

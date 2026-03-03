@@ -275,7 +275,10 @@ void setup() {
   xTaskCreate(serialRxTask,      "SerRx",   4096, NULL, 2, NULL);
   xTaskCreate(espNowTxTask,      "NowTx",   4096, NULL, 2, NULL);
 
-  Serial.println("UGV Bridge Ready!");
+  Serial.println("====================================");
+  Serial.print("UGV Bridge Ready! MAC: ");
+  Serial.println(WiFi.macAddress());
+  Serial.println("====================================");
 }
 
 void loop() {
