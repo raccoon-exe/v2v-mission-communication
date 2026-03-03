@@ -15,7 +15,7 @@ TELEM_SEND_HZ = 5    # Broadcast frequency
 
 # ------------------- UGV Setup (DroneKit) -------------------
 print("==========================================")
-print("   UGV GROUND STATION - ROBUST ARMING")
+print("   UGV GROUND STATION2 - ROBUST ARMING")
 print("==========================================")
 print(f"[Ground] Connecting to UGV at {UGV_CONTROL_PORT}...")
 
