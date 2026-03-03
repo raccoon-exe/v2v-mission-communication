@@ -4,8 +4,8 @@ import v2v_bridge
 from pymavlink import mavutil 
 
 # ------------------- SET THESE PORTS -------------------
-UGV_CONTROL_PORT = "/dev/ttyACM1"  # UGV Flight Controller (Cube/Pixhawk)
-ESP32_BRIDGE_PORT = "/dev/ttyACM0" # UGV ESP32 Bridge
+UGV_CONTROL_PORT = "/dev/ttyACM0"  # UGV Flight Controller (Cube/Pixhawk)
+ESP32_BRIDGE_PORT = "/dev/ttyUSB0"
 
 # ------------------- Mission params -------------------
 DIST_M = 3.048       # 10 ft
@@ -102,7 +102,12 @@ def main():
             # 1. READ AIR STATUS (Optional display)
             air_telem = bridge.get_telemetry()
             
-            # 2. BROADCAST OUR STATUS (So UAV can see if we are armed)
+            # 2. READ DEBUG MESSAGES
+            msg = bridge.get_message()
+            if msg:
+                print(f"\n>>> [AIR MESSAGE]: {msg}\n")
+            
+            # 3. BROADCAST OUR STATUS (So UAV can see if we are armed)
             t_ms = int(time.time() * 1000) & 0xFFFFFFFF
             bridge.send_telemetry(telem_seq, t_ms, 0.0, 0.0, 1 if vehicle.armed else 0, get_mode_index())
             telem_seq += 1

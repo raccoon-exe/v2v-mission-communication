@@ -7,6 +7,7 @@ import time
 SOF = 0xAA
 TYPE_TELEM = 1
 TYPE_CMD = 2
+TYPE_MSG = 3 # Raw string message
 
 # -------------------- COMMAND CODES --------------------
 CMD_ARM          = 1
@@ -41,6 +42,7 @@ class V2VBridge:
         # State
         self.latest_telemetry = None
         self.latest_command = None
+        self.latest_msg = None
         self._running = False
         self._lock = threading.Lock()
         self._thread = None
@@ -103,6 +105,11 @@ class V2VBridge:
                         self.latest_telemetry = struct.unpack(TELEM_FMT, payload)
                     elif f_type == TYPE_CMD and f_len == struct.calcsize(CMD_FMT):
                         self.latest_command = struct.unpack(CMD_FMT, payload)
+                    elif f_type == TYPE_MSG:
+                        try:
+                            self.latest_msg = payload.decode('ascii', errors='ignore')
+                        except:
+                            pass
 
     def get_telemetry(self):
         """Returns (seq, t_ms, vx, vy, marker, estop) or None."""
@@ -117,6 +124,14 @@ class V2VBridge:
                 self.latest_command = None
             return val
 
+    def get_message(self, consume=True):
+        """Returns the latest string message or None."""
+        with self._lock:
+            val = self.latest_msg
+            if consume:
+                self.latest_msg = None
+            return val
+
     def send_telemetry(self, seq, t_ms, vx, vy, marker, estop):
         """Packs and sends a telemetry frame."""
         payload = struct.pack(TELEM_FMT, seq, t_ms, vx, vy, marker, estop)
@@ -129,4 +144,11 @@ class V2VBridge:
         payload = struct.pack(CMD_FMT, cmdSeq, cmd, estop)
         chk = self._chk_xor(TYPE_CMD, len(payload), payload)
         self.ser.write(bytes([SOF, TYPE_CMD, len(payload)]) + payload + bytes([chk]))
+        self.ser.flush()
+
+    def send_message(self, text: str):
+        """Sends a raw string message (max 60 chars)."""
+        payload = text[:60].encode('ascii', errors='ignore')
+        chk = self._chk_xor(TYPE_MSG, len(payload), payload)
+        self.ser.write(bytes([SOF, TYPE_MSG, len(payload)]) + payload + bytes([chk]))
         self.ser.flush()

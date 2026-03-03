@@ -28,6 +28,9 @@ def main():
     bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge")
     try:
         bridge.connect()
+        # Debug link check
+        print("[Mission 1] Sending Hello to UGV...")
+        bridge.send_message("hello pissrat . we connected")
     except Exception as e:
         print(f"!!! Error connecting to ESP32: {e} !!!")
         return

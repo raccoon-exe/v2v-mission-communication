@@ -18,6 +18,7 @@ static uint8_t UAV_MAC[6] = {0xf8, 0xb3, 0xb7, 0x20, 0x25, 0xa8};
 static const uint8_t SOF = 0xAA; // start of FRAME marker (170 in decimal)
 static const uint8_t TYPE_TELEM = 1; // from Air (UAV) 
 static const uint8_t TYPE_CMD   = 2; // from Ground (Pi/PC)
+static const uint8_t TYPE_MSG   = 3; // raw string messages (from Air)
 
 // -------------------- Data Structs --------------------
 
@@ -42,6 +43,7 @@ typedef struct __attribute__((packed)) {
 // -------------------- QUEUES (Mailboxes) --------------------
 static QueueHandle_t qTelemToSerial = nullptr; // Radio -> forward to Pi (USB)
 static QueueHandle_t qCmdToSerial   = nullptr; // Radio (from Air) -> forward to Pi
+static QueueHandle_t qMsgToSerial   = nullptr; // Radio (from Air) -> forward to Pi
 static QueueHandle_t qCmdToNow      = nullptr; // Pi (USB) -> send to Radio
 
 // -------------------- MUTEX (Safety Lock) --------------------
@@ -91,6 +93,15 @@ void onDataRecv(const uint8_t* mac, const uint8_t* data, int len) {
       memcpy(&cmd, data + 1, sizeof(cmd));
       if (qCmdToSerial) xQueueSend(qCmdToSerial, &cmd, 0);
     }
+  }
+  // Catching Messages from the UAV
+  else if (data[0] == TYPE_MSG) {
+      uint8_t payload[64];
+      memset(payload, 0, 64);
+      uint8_t msgLen = len - 1;
+      if (msgLen > 64) msgLen = 64;
+      memcpy(payload, data+1, msgLen);
+      if (qMsgToSerial) xQueueSend(qMsgToSerial, payload, 0);
   }
 }
 
@@ -172,7 +183,23 @@ void serialTxCmdTask(void* pv) {
   }
 }
 
-// Worker 3: Listens to Pi (USB) and parses commands
+// Worker 3: Sends Messages from UAV to Pi (USB)
+void serialTxMsgTask(void* pv) {
+  (void)pv;
+  uint8_t payload[64];
+  for (;;) {
+    if (xQueueReceive(qMsgToSerial, payload, portMAX_DELAY) == pdTRUE) {
+      // Find valid length
+      uint8_t len = 0;
+      while (len < 64 && payload[len] != 0) len++;
+      if (len == 0) continue;
+      
+      serial_send_frame(TYPE_MSG, payload, len);
+    }
+  }
+}
+
+// Worker 4: Listens to Pi (USB) and parses commands
 void serialRxTask(void* pv) {
   (void)pv;
   SerialParser parser;
@@ -238,11 +265,13 @@ void setup() {
   // Physically build the Mailboxes
   qTelemToSerial = xQueueCreate(10, sizeof(TelemetryPayload));
   qCmdToSerial   = xQueueCreate(10, sizeof(CommandPayload));
+  qMsgToSerial   = xQueueCreate(10, 64);
   qCmdToNow      = xQueueCreate(10, sizeof(CommandPayload));
 
   // Hire the Workers (Tasks)
   xTaskCreate(serialTxTelemTask, "TxTelem", 4096, NULL, 2, NULL);
   xTaskCreate(serialTxCmdTask,   "TxCmd",   4096, NULL, 2, NULL);
+  xTaskCreate(serialTxMsgTask,   "TxMsg",   4096, NULL, 2, NULL);
   xTaskCreate(serialRxTask,      "SerRx",   4096, NULL, 2, NULL);
   xTaskCreate(espNowTxTask,      "NowTx",   4096, NULL, 2, NULL);
 

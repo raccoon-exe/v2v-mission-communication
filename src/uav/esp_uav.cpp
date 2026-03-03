@@ -18,6 +18,7 @@ static uint8_t UGV_MAC[6] = {0xF8, 0xB3, 0xB7, 0x20, 0x69, 0xC0};
 static const uint8_t SOF = 0xAA; // start of FRAME: marker (170)
 static const uint8_t TYPE_TELEM = 1; // used for UAV -> UGV (telemetry data)
 static const uint8_t TYPE_CMD   = 2; // used for UGV -> UAV (commands)
+static const uint8_t TYPE_MSG   = 3; // used for raw string messages (UAV -> UGV)
 
 // -------------------- Data Structs --------------------
 
@@ -42,6 +43,7 @@ typedef struct __attribute__((packed)) {
 // -------------------- Queues (Mailboxes) --------------------
 static QueueHandle_t qTelemToNow  = nullptr; // Jetson (USB) -> send out over Radio
 static QueueHandle_t qCmdToNow    = nullptr; // Jetson (USB) -> send out over Radio (to UGV)
+static QueueHandle_t qMsgToNow    = nullptr; // Jetson (USB) -> send out over Radio (Hello messages)
 static QueueHandle_t qCmdToSerial = nullptr; // Incoming Radio -> forward to Jetson (USB)
 
 // -------------------- Helpers (Security Guard) --------------------
@@ -155,6 +157,15 @@ void serialRxTask(void* pv) {
           memcpy(&c, payload, sizeof(c));
           if (qCmdToNow) xQueueSend(qCmdToNow, &c, 0);
         }
+        // Did we get a String Message?
+        else if (fType == TYPE_MSG) {
+            // We'll just pass the raw bytes (string) to the Radio task
+            // We encapsulate it in a small struct or just use a fixed buffer
+            uint8_t msgBuf[64];
+            memset(msgBuf, 0, 64);
+            memcpy(msgBuf, payload, fLen);
+            if (qMsgToNow) xQueueSend(qMsgToNow, msgBuf, 0);
+        }
       }
     }
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -191,7 +202,27 @@ void radioTxCmdTask(void* pv) {
   }
 }
 
-// Worker 4: Forwards Radio-Commands to Jetson (USB)
+// Worker 4: Sends String Messages over Radio to UGV
+void radioTxMsgTask(void* pv) {
+  (void)pv;
+  uint8_t payload[64];
+  uint8_t pkt[1 + 64];
+  pkt[0] = TYPE_MSG;
+
+  for (;;) {
+    if (xQueueReceive(qMsgToNow, payload, portMAX_DELAY) == pdTRUE) {
+      // Find length (simple null or 64)
+      uint8_t len = 0;
+      while (len < 64 && payload[len] != 0) len++;
+      if (len == 0) continue; // skip empty
+      
+      memcpy(pkt + 1, payload, len);
+      esp_now_send(UGV_MAC, pkt, 1 + len);
+    }
+  }
+}
+
+// Worker 5: Forwards Radio-Commands to Jetson (USB)
 void serialTxTask(void* pv) {
   (void)pv;
   CommandPayload c;
@@ -221,12 +252,14 @@ void setup() {
 
   qTelemToNow  = xQueueCreate(10, sizeof(TelemetryPayload));
   qCmdToNow    = xQueueCreate(10, sizeof(CommandPayload));
+  qMsgToNow    = xQueueCreate(10, 64);
   qCmdToSerial = xQueueCreate(10, sizeof(CommandPayload));
 
   // Hiring the Workers
   xTaskCreate(serialRxTask,      "SerRx",   4096, nullptr, 2, nullptr);
   xTaskCreate(radioTxTelemTask,  "RadTelem",4096, nullptr, 2, nullptr);
   xTaskCreate(radioTxCmdTask,    "RadCmd",  4096, nullptr, 2, nullptr);
+  xTaskCreate(radioTxMsgTask,    "RadMsg",  4096, nullptr, 2, nullptr);
   xTaskCreate(serialTxTask,      "SerTx",   4096, nullptr, 1, nullptr);
 
   Serial.println("UAV Bridge Ready!");
