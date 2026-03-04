@@ -1,53 +1,90 @@
-######### drone mission template
+######### MISSION TEMPLATE - GPS-DENIED RC OVERRIDE PATTERN
+# use this as a starting point for any new drone missions
+# this pattern is confirmed to work for arming and flight on our cube orange
 
-# use this file as a starter whenever you want to make a new mission script
-# it has all the sync radio and bridge stuff already setup for you
-import time # need this so we dont spam the cpu and can wait for stuff
-import v2v_bridge # this is the translator that handles the messy binary packing
-from pymavlink import mavutil # only bring this in if you actually need to look at the drone stats
+from pymavlink import mavutil # verified flight library
+import time # for timing and sleeps
+import v2v_bridge # our custom radio bridge talker
 
-# where the physical hardware is actually plugged into the board
-ESP32_PORT = "/dev/ttyUSB0" # this is where the esp32 radio box is plugged in
-DRONE_PORT = "/dev/ttyACM0" # this is the main drone flight controller wire
+################################# config stuff
+# basic settings i usually set
+CONNECTION_STRING = "/dev/ttyACM0"   # drone wire (usb/serial)
+BAUD_RATE = 57600                    # confirmed working baud rate
+ESP32_PORT = "/dev/ttyUSB0"          # the radio bridge hardware
 
-def main(): # the main boss function that runs the whole show
-    # step 1 is to start up the radio bridge link so they can talk
-    print("STARTING MISSION") # just printing out that we are kicking things off
-    bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="Mission Brain") # creating the bridge object and giving it a name
-    try: # trying to connect without crashing the whole script
-        bridge.connect() # actually opening the serial port to the radio box
-        bridge.send_message("NEW MISSION STARTING") # sending the very first hello over the air
-    except: return # if it fails just bail out and stop everything
+# mission params
+TARGET_ALT = 1.3  # hover height to pass rule (4.2ft)
 
-    # step 2 is to sync up with the ground rover
-    # we really dont want to start shouting commands if the ugv is ghosting us or dead
-    ugv_ready = False # setting the flag to false to start our wait loop
-    while not ugv_ready: # keep looping until the rover actually talks back to us
-        data = bridge.get_telemetry() # hunt through the radio traffic for the rover status
-        if data: # if we actually got a real packet and not just garbage
-            # unpacking the structs we get seq time speed armed state and safety bits
-            print(f"UGV FOUND Status Armed={data[4]}") # print out that we found it and if it is armed
-            ugv_ready = True # flip the flag so we can break out of the sync loop
-        time.sleep(1.0) # sleep for a bit so we dont melt the cpu while waiting
+# throttle settings i tuned
+THROTTLE_MIN = 1000   # motors completely off
+THROTTLE_IDLE = 1150  # motors spinning but no lift
+THROTTLE_CLIMB = 1650 # power needed to lift off
+THROTTLE_HOVER = 1500 # rough middle power to hold height
 
-    # step 3 is to actually do the chores
-    # this is where you put your actual mission logic and tell it what to do
+############################ the mavlink helpers
 
-    # for example we are going to send a move command
-    print("Sending move command") # letting the terminal know we are bullying it to move
-    # sending sequence id 999 to move forward and making sure emergency stop is 0
-    bridge.send_command(cmdSeq=999, cmd=v2v_bridge.CMD_MOVE_FORWARD, estop=0) # shoving the actual command into the translator
+def set_throttle(master, pwm): # rc override heartbeat for channel 3
+    # ardupilot needs this pulse frequently or it cuts the motors
+    master.mav.rc_channels_override_send(master.target_system, master.target_component, 0, 0, pwm, 0, 0, 0, 0, 0)
 
-    # now we do a loop just to watch the ugv move and see its speed
-    start_t = time.time() # grabbing the current clock time to start our timer
-    while (time.time() - start_t) < 5.0: # keep doing this loop for exactly 5 seconds
-        data = bridge.get_telemetry() # catch the latest telemetry packet from the radio
-        if data: # checking again to make sure it is not empty garbage
-            print(f"ugv Speed {data[2]:.2f} m/s", end='\r') # print the speed and overwrite the line so it looks clean
-        time.sleep(0.5) # pause for half a second before asking for the speed again
+def get_lidar_alt(master): # checks real distance from the floor
+    # grabbing the raw distance packet from the lidarlitev3 sensor
+    msg = master.recv_match(type='DISTANCE_SENSOR', blocking=True, timeout=1.0)
+    if msg: return msg.current_distance / 100.0 # convert cm to meters
+    return 0.0 # return 0 if the sensor is ghosting
 
-    print("\nMISSION COMPLETE") # print that we are totally done with the chores
-    bridge.stop() # close the serial port and shut down the radio bridge cleanly
+def change_mode(master, mode: str): # changes drone flight mode
+    mapping = master.mode_mapping()
+    if mode not in mapping: return
+    mode_id = mapping[mode]
+    master.mav.set_mode_send(master.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode_id)
+    time.sleep(1) # wait for mode shift
+
+#################### main logic skeleton
+
+def main(): # main mission boss
+    # 1. connect wire and radio
+    master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE)
+    master.wait_heartbeat() # wait for pulse
+    
+    bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="Drone-Template")
+    try: bridge.connect() # open radio
+    except: return
+
+    try:
+        # 2. auto launch sequence
+        change_mode(master, "STABILIZE") # switch to stabilize for manual override
+        
+        # arming motors
+        master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0,0,0,0,0,0)
+        time.sleep(2) # wait for spinup
+        
+        # climb phase
+        while True: # climb until high enough
+            alt = get_lidar_alt(master)
+            if alt >= TARGET_ALT: break
+            set_throttle(master, THROTTLE_CLIMB) # pushing up
+            time.sleep(0.1) # quick loop for heartbeat
+        
+        # 3. MISSION BODY
+        while True: # the actual mission work goes here
+            set_throttle(master, THROTTLE_HOVER) # ALWAYS send heartbeat in every loop
+            
+            # example: wait for UGV or track target
+            # if mission_done(): break
+            
+            time.sleep(0.1) # keep it smooth
+
+        # 4. shutdown
+        set_throttle(master, THROTTLE_IDLE) # descend
+        time.sleep(2) # drift down
+        set_throttle(master, 0) # release control
+        # disarm_drone(master)
+
+    except KeyboardInterrupt: # e-stop
+        set_throttle(master, 0)
+    finally:
+        bridge.stop()
 
 if __name__ == "__main__":
     main()

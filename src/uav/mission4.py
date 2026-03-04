@@ -102,11 +102,12 @@ def main(): # the main boss function
         # step 3: sync with ground rover
         print("Waiting for UGV sync...") # logging wait
         while True: # loop until radio sync
+            set_throttle(master, THROTTLE_HOVER) # MUST keep sending hover pulse or it crashes
             data = bridge.get_telemetry() # pull from mailbox
             if data: # if we got a packet
                 print("UGV Ready. Initiating Circles.") # log coordination
                 break # done
-            time.sleep(1) # wait a sec
+            time.sleep(0.2) # check 5 times a second to keep rc heartbeat alive
 
         # step 4: command the rover work
         bridge.send_command(cmdSeq=400, cmd=v2v_bridge.CMD_CIRCLE, estop=0) # blast command
