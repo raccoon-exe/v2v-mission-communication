@@ -130,27 +130,26 @@ def main(): # the main boss function
             time.sleep(0.1) # 10hz loop
 
         # step 5: land and shutdown
-        print("\nLanding...") # start descent
+        print("\nLanding sequence engaged...") # start descent
+        change_mode(master, "LAND") # switch to official land mode for graceful touchdown
+        set_throttle(master, 0) # release throttle override so autopilot takes over
+
         while True: # loop until we hit the floor
             alt = get_lidar_alt(master) # check lidar
             print(f" Land Alt: {alt:.2f}m", end='\r') # log altitude
-            if alt < 0.2: # if we are barely off the floor
-                set_throttle(master, THROTTLE_IDLE) # cut to idle
-                print("\nTouchdown confirmed.") # log success
+            
+            # checking if the drone disarmed itself (autopilot does this after landing)
+            msg = master.recv_match(type='HEARTBEAT', blocking=False)
+            if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                print("\nTouchdown confirmed. Motors stopped.") # log success
                 break # exit
-            set_throttle(master, THROTTLE_HOVER - 150) # slow descent power
-            time.sleep(0.1) # quick loop
+            time.sleep(0.5) # slower loop for checking
 
-        time.sleep(1) # let it settle
-        set_throttle(master, 0) # release rc override control
-        disarm_drone(master) # stop the props
-
-    except KeyboardInterrupt: # panics
-        print("\nABORT: Emergency Cleanup...") # abort log
-        set_throttle(master, THROTTLE_IDLE) # cut power
-        time.sleep(0.5) # settle
-        set_throttle(master, 0) # release control
-        disarm_drone(master) # stop props
+    except KeyboardInterrupt: # someone hit ctrl+c
+        print("\n[!] Emergency: User Triggered Landing...") # abort log
+        change_mode(master, "LAND") # force land mode immediately
+        set_throttle(master, 0) # release override
+        time.sleep(1) # wait for command to hit
     finally: # final chores
         bridge.stop() # close radio wire
         print("Mission finalized.") # end log

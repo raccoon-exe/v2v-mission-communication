@@ -83,84 +83,102 @@ def main(): # main mission boss engine
     try: bridge.connect()
     except: return
 
-    log_event("Connecting to Drone Cube Orange...")
-    master = mavutil.mavlink_connection(DRONE_PORT, baud=BAUD_RATE)
-    master.wait_heartbeat()
-    log_event("Drone Heartbeat OK.")
+    try:
+        log_event("Connecting to Drone Cube Orange...")
+        master = mavutil.mavlink_connection(DRONE_PORT, baud=BAUD_RATE)
+        master.wait_heartbeat()
+        log_event("Drone Heartbeat OK.")
 
-    log_event("Waiting for UGV radio link...")
-    ugv_synced = False
-    while not ugv_synced: # sync loop
-        set_throttle(master, 0) # keep control released while waiting
-        if bridge.get_telemetry():
-            log_event("UGV Found. Communications verified.")
-            ugv_synced = True
-        time.sleep(1.0)
-
-    # autonomous launch (manual throttle ramp)
-    log_event("UAV START TIME: Initiating Launch...")
-    change_mode(master, "STABILIZE")
-    
-    # arming motors
-    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0,0,0,0,0,0)
-    time.sleep(2)
-    
-    launch_t = time.time()
-    while True: # climb loop
-        alt = get_lidar_alt(master)
-        if alt >= (TARGET_ALT * 0.9): break
-        set_throttle(master, THROTTLE_CLIMB) # pushing up
-        time.sleep(0.1)
-    
-    set_throttle(master, THROTTLE_HOVER) # switch to hover power
-    log_event(f"UAV reached {TARGET_ALT}m altitude.")
-
-    log_event("UGV START TIME: Commanding UGV to move...")
-    bridge.send_command(cmdSeq=1, cmd=v2v_bridge.CMD_MISSION_1, estop=0)
-    
-    tracker = Tracker()
-    # cam = cv2.VideoCapture(0) # zed x camera
-    
-    log_event("Tracking UGV. Alignment Sequence Running...")
-    is_home = False
-    
-    while not is_home: # tracking loop
-        # HEARTBEAT: must keep sending throttle or it crashes
-        set_throttle(master, THROTTLE_HOVER) 
-        
-        if (time.time() - launch_t) > MISSION_TIMEOUT:
-            log_event("!!! FAILURE: TIMEOUT EXCEEDED (7 MIN) !!!")
-            break
-            
-        target = tracker.find_ugv(None) # find rover in camera
-        if target: # if detected
-            send_velocity_pulse(master, 0.2, 0.0, 0.1) # tracking drift
-        else: # if lost
-            send_velocity_pulse(master, 0.0, 0.0, 0.0) # station hold
-            
-        # check for touchdown (disarmed means landed)
-        msg = master.recv_match(type='HEARTBEAT', blocking=False)
-        if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-            log_event("UAV LANDING TIME: Touchdown confirmed.")
-            is_home = True
-            break
-            
-        time.sleep(0.1) # 10hz loop heartbeat
-
-    if is_home: # final ride duration
-        log_event("Initiating 30-Second Ride Duration...")
-        set_throttle(master, 0) # release control once landed
-        ride_start = time.time()
-        while (time.time() - ride_start) < RIDE_TIME_REQ:
+        log_event("Waiting for UGV radio link...")
+        ugv_synced = False
+        while not ugv_synced: # sync loop
+            set_throttle(master, 0) # keep control released while waiting
+            if bridge.get_telemetry():
+                log_event("UGV Found. Communications verified.")
+                ugv_synced = True
             time.sleep(1.0)
+
+        # autonomous launch (manual throttle ramp)
+        log_event("UAV START TIME: Initiating Launch...")
+        change_mode(master, "STABILIZE")
         
-        log_event("RIDE DURATION TIME COMPLETE: 30s achieved.")
-        log_event("MISSION 1 SUCCESSFUL")
-        bridge.send_command(cmdSeq=2, cmd=v2v_bridge.CMD_STOP, estop=0)
-    
-    bridge.stop()
-    set_throttle(master, 0) # triple check safety
-    disarm_drone(master) # finish up
+        # arming motors
+        master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0,0,0,0,0,0)
+        time.sleep(2)
+        
+        launch_t = time.time()
+        while True: # climb loop
+            alt = get_lidar_alt(master)
+            if alt >= (TARGET_ALT * 0.9): break
+            set_throttle(master, THROTTLE_CLIMB) # pushing up
+            time.sleep(0.1)
+        
+        set_throttle(master, THROTTLE_HOVER) # switch to hover power
+        log_event(f"UAV reached {TARGET_ALT}m altitude.")
+
+        log_event("UGV START TIME: Commanding UGV to move...")
+        bridge.send_command(cmdSeq=1, cmd=v2v_bridge.CMD_MISSION_1, estop=0)
+        
+        tracker = Tracker()
+        # cam = cv2.VideoCapture(0) # zed x camera
+        
+        log_event("Tracking UGV. Alignment Sequence Running...")
+        is_home = False
+        
+        while not is_home: # tracking loop
+            set_throttle(master, THROTTLE_HOVER) # HEARTBEAT
+            
+            if (time.time() - launch_t) > MISSION_TIMEOUT:
+                log_event("!!! FAILURE: TIMEOUT EXCEEDED (7 MIN) !!!")
+                break
+                
+            target = tracker.find_ugv(None) # find rover in camera
+            if target: # if detected
+                send_velocity_pulse(master, 0.2, 0.0, 0.1) # tracking drift
+            else: # if lost
+                send_velocity_pulse(master, 0.0, 0.0, 0.0) # station hold
+                
+            # check for touchdown (disarmed means landed)
+            msg = master.recv_match(type='HEARTBEAT', blocking=False)
+            if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                log_event("UAV LANDING TIME: Platform landing confirmed.")
+                is_home = True
+                break
+                
+            time.sleep(0.1) # 10hz loop heartbeat
+
+        # if we timed out or need to force a safe landing
+        if not is_home:
+            log_event("Initiating Safe Landing Sequence...")
+            change_mode(master, "LAND")
+            set_throttle(master, 0) # release to autopilot
+            while True:
+                msg = master.recv_match(type='HEARTBEAT', blocking=False)
+                if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                    log_event("Touchdown and disarm confirmed.")
+                    is_home = True
+                    break
+                time.sleep(0.5)
+
+        if is_home: # final ride duration
+            log_event("Initiating 30-Second Ride Duration...")
+            set_throttle(master, 0) # release control once landed
+            ride_start = time.time()
+            while (time.time() - ride_start) < RIDE_TIME_REQ:
+                time.sleep(1.0)
+            
+            log_event("RIDE DURATION TIME COMPLETE: 30s achieved.")
+            log_event("MISSION 1 SUCCESSFUL")
+            bridge.send_command(cmdSeq=2, cmd=v2v_bridge.CMD_STOP, estop=0)
+        
+    except KeyboardInterrupt:
+        log_event("[!] Emergency: User Triggered Landing Sequence.")
+        change_mode(master, "LAND")
+        set_throttle(master, 0)
+        time.sleep(1)
+    finally:
+        bridge.stop()
+        set_throttle(master, 0) # final safety check
 
 if __name__ == "__main__":
     main()

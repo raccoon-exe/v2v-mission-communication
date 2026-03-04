@@ -48,10 +48,10 @@ def main(): # main mission boss
     master.wait_heartbeat() # wait for pulse
     
     bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="Drone-Template")
-    try: bridge.connect() # open radio
-    except: return
-
+    
     try:
+        bridge.connect() # open radio
+        
         # 2. auto launch sequence
         change_mode(master, "STABILIZE") # switch to stabilize for manual override
         
@@ -75,16 +75,26 @@ def main(): # main mission boss
             
             time.sleep(0.1) # keep it smooth
 
-        # 4. shutdown
-        set_throttle(master, THROTTLE_IDLE) # descend
-        time.sleep(2) # drift down
-        set_throttle(master, 0) # release control
-        # disarm_drone(master)
+        # 4. shutdown / landing
+        print("Mission Complete. Landing safely...")
+        change_mode(master, "LAND") # switch to land mode
+        set_throttle(master, 0) # release control to autopilot
+        
+        while True: # wait for disarm
+            msg = master.recv_match(type='HEARTBEAT', blocking=False)
+            if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                print("Landed and disarmed safely.")
+                break
+            time.sleep(0.5)
 
-    except KeyboardInterrupt: # e-stop
+    except KeyboardInterrupt: # e-stop / user abort
+        print("User Abort. Forcing Landing...")
+        change_mode(master, "LAND")
         set_throttle(master, 0)
+        time.sleep(1)
     finally:
         bridge.stop()
+        set_throttle(master, 0) # final safety
 
 if __name__ == "__main__":
     main()

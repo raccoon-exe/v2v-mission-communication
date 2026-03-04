@@ -87,10 +87,10 @@ def main(): # main safety check engine
         time.sleep(0.1)
     
     # kill switch test
-    log_event("KILL SWITCH ACTIVATION: Triggering Emergency Stop...")
+    log_event("KILL SWITCH ACTIVATION: Triggering Emergency Land...")
     kill_t = time.time()
-    set_throttle(master, THROTTLE_MIN) # cut power immediately
-    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 21196.0, 0,0,0,0,0)
+    change_mode(master, "LAND") # force safe landing instead of cutting power
+    set_throttle(master, 0) # release control
     
     stop_v = False
     while (time.time() - kill_t) < 15:

@@ -83,81 +83,99 @@ def main(): # main mission 2 logic
     try: bridge.connect()
     except: return
 
-    log_event("Connecting to Cube Orange flight controller...")
-    master = mavutil.mavlink_connection(DRONE_PORT, baud=BAUD_RATE)
-    master.wait_heartbeat()
-    log_event("Drone Heartbeat OK.")
+    try:
+        log_event("Connecting to Cube Orange flight controller...")
+        master = mavutil.mavlink_connection(DRONE_PORT, baud=BAUD_RATE)
+        master.wait_heartbeat()
+        log_event("Drone Heartbeat OK.")
 
-    # auto launch (STABILIZE pattern)
-    log_event("Initiating Autonomous Launch Phase...")
-    change_mode(master, "STABILIZE")
-    master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0,0,0,0,0,0)
-    time.sleep(2)
-    
-    launch_t = time.time()
-    while True: # climb loop
-        alt = get_lidar_alt(master)
-        if alt >= (TARGET_ALT * 0.9): break
-        set_throttle(master, THROTTLE_CLIMB) # pushing up
-        time.sleep(0.1)
-    
-    set_throttle(master, THROTTLE_HOVER)
-    log_event(f"Minimum Altitude {TARGET_ALT}m Reached.")
+        # auto launch (STABILIZE pattern)
+        log_event("Initiating Autonomous Launch Phase...")
+        change_mode(master, "STABILIZE")
+        master.mav.command_long_send(master.target_system, master.target_component, mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0,0,0,0,0,0)
+        time.sleep(2)
+        
+        launch_t = time.time()
+        while True: # climb loop
+            alt = get_lidar_alt(master)
+            if alt >= (TARGET_ALT * 0.9): break
+            set_throttle(master, THROTTLE_CLIMB) # pushing up
+            time.sleep(0.1)
+        
+        set_throttle(master, THROTTLE_HOVER)
+        log_event(f"Minimum Altitude {TARGET_ALT}m Reached.")
 
-    # destination discovery (ArUco Hunt)
-    log_event("Starting Field Scan for ArUco Marker ID 0-4...")
-    tracker = Tracker()
-    found = False
-    target_x, target_y = 0.0, 0.0
-    
-    while not found: # search loop
-        set_throttle(master, THROTTLE_HOVER) # HEARTBEAT
-        res = tracker.find_target(None)
-        if res:
-            m_id, cx, cy = res
-            log_event(f"DESTINATION DISCOVERY: Found Marker ID {m_id}")
-            target_x, target_y = 10.0, 5.0 # fake destination
-            found = True
-        else:
-            send_velocity_pulse(master, 0.1, 0.0, 0.0) # scout drift
+        # destination discovery (ArUco Hunt)
+        log_event("Starting Field Scan for ArUco Marker ID 0-4...")
+        tracker = Tracker()
+        found = False
+        target_x, target_y = 0.0, 0.0
+        
+        while not found: # search loop
+            set_throttle(master, THROTTLE_HOVER) # HEARTBEAT
+            res = tracker.find_target(None)
+            if res:
+                m_id, cx, cy = res
+                log_event(f"DESTINATION DISCOVERY: Found Marker ID {m_id}")
+                target_x, target_y = 10.0, 5.0 # fake destination
+                found = True
+            else:
+                send_velocity_pulse(master, 0.1, 0.0, 0.0) # scout drift
+                time.sleep(0.1)
+
+        # coordination relay
+        log_event("COMMUNICATION: Sending coordinates to UGV...")
+        bridge.send_message(f"GOTO:{target_x},{target_y}")
+        time.sleep(0.5)
+        bridge.send_command(cmdSeq=1, cmd=v2v_bridge.CMD_MISSION_2, estop=0)
+
+        # tracking & landing
+        log_event("Aligning for Precision Landing on Moving Platform...")
+        landed = False
+        while not landed: # alignment loop
+            set_throttle(master, THROTTLE_HOVER) # HEARTBEAT
+            if (time.time() - launch_t) > MISSION_TIMEOUT: break
+                
+            send_velocity_pulse(master, 0.15, 0.0, 0.1) # descent drift
+            
+            # detect touchdown
+            msg_l = master.recv_match(type='HEARTBEAT', blocking=False)
+            if msg_l and not (msg_l.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                log_event("UAV LANDING TIME: Platform landing confirmed.")
+                landed = True
+                break
             time.sleep(0.1)
 
-    # coordination relay
-    log_event("COMMUNICATION: Sending coordinates to UGV...")
-    bridge.send_message(f"GOTO:{target_x},{target_y}")
-    time.sleep(0.5)
-    bridge.send_command(cmdSeq=1, cmd=v2v_bridge.CMD_MISSION_2, estop=0)
+        if not landed:
+            log_event("Initiating Safe Landing Sequence...")
+            change_mode(master, "LAND")
+            set_throttle(master, 0)
+            while True:
+                msg = master.recv_match(type='HEARTBEAT', blocking=False)
+                if msg and not (msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                    log_event("UAV Landing Confirmed.")
+                    landed = True
+                    break
+                time.sleep(0.5)
 
-    # tracking & landing
-    log_event("Aligning for Precision Landing on Moving Platform...")
-    landed = False
-    while not landed: # alignment loop
-        set_throttle(master, THROTTLE_HOVER) # HEARTBEAT
-        if (time.time() - launch_t) > MISSION_TIMEOUT: break
-            
-        send_velocity_pulse(master, 0.15, 0.0, 0.1) # descent drift
-        
-        # detect touchdown
-        msg_l = master.recv_match(type='HEARTBEAT', blocking=False)
-        if msg_l and not (msg_l.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
-            log_event("UAV LANDING TIME: Platform landing confirmed.")
-            landed = True
-            break
-        time.sleep(0.1)
+        if landed: # ride duration
+            log_event("Riding UGV to final destination...")
+            set_throttle(master, 0)
+            ride_t = time.time()
+            while (time.time() - ride_t) < RIDE_TIME_REQ:
+                time.sleep(1.0)
+            log_event("END TIMES: Ride complete. UGV at destination.")
+            bridge.send_command(cmdSeq=2, cmd=v2v_bridge.CMD_STOP, estop=0)
+            log_event("MISSION 2 SUCCESSFUL")
 
-    if landed: # ride duration
-        log_event("Riding UGV to final destination...")
-        set_throttle(master, 0) # release control
-        ride_t = time.time()
-        while (time.time() - ride_t) < RIDE_TIME_REQ:
-            time.sleep(1.0)
-        log_event("END TIMES: Ride complete. UGV at destination.")
-        bridge.send_command(cmdSeq=2, cmd=v2v_bridge.CMD_STOP, estop=0)
-        log_event("MISSION 2 SUCCESSFUL")
-
-    bridge.stop()
-    set_throttle(master, 0)
-    disarm_drone(master)
+    except KeyboardInterrupt:
+        log_event("[!] Emergency: User Triggered Landing Sequence.")
+        change_mode(master, "LAND")
+        set_throttle(master, 0)
+        time.sleep(1)
+    finally:
+        bridge.stop()
+        set_throttle(master, 0) # final safety check
 
 if __name__ == "__main__":
     main()
