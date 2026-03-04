@@ -1,115 +1,158 @@
-from dronekit import connect, VehicleMode # i am using dronekit now cause its way easier to boss the drone around
-import time # pulling this in so i can do sleeps and not melt the brain
-import v2v_bridge # our custom radio translator for talking to the ground rover
-from pymavlink import mavutil # still need this just to catch the raw lidar packets
+from pymavlink import mavutil # using the confirmed mavlink pattern instead of dronekit
+import time # for timing and sleeps
+import sys # for clean exits
+import v2v_bridge # our custom radio bridge talker
 
-# uav mission 4 - autonomous flight + ugv circle
-# the goal is to takeoff and hang in the air while the rover does circles
+# uav mission 4 - autonomous flight (throttle override) + ugv circle
+# this uses the pattern the user confirmed works (stabilize + rc override)
 
 ################################# config stuff i setup
-# where the hardware is actually plugged into the jetson
-CONNECTION_STRING = "/dev/ttyACM0"   # the wire for the cube orange controller
-BAUD_RATE = 115200                   # standard speed for the serial wire
-ESP32_PORT = "/dev/ttyUSB0"          # the usb wire for the radio bridge box
+# connection settings from your working test script
+CONNECTION_STRING = "/dev/ttyACM0"   # drone wire (use COM4 if testing on windows)
+BAUD_RATE = 57600                    # using the confirmed 57600 speed
+ESP32_PORT = "/dev/ttyUSB0"          # the radio bridge usb wire
 
 # mission params
-TARGET_ALT = 1.3  # hovering at 4.2 feet so it passes the 4ft rule
-CIRCLE_TIME = 18.0 # letting the rover spin for 18 seconds total
+TARGET_ALT = 1.3    # hover height in meters (4.2 ft)
+CIRCLE_TIME = 18.0  # duration for the rover maneuvers
 
-def get_lidar_alt(vehicle): # i wrote this to check the real distance from the floor
-    # i have to grab the raw distance sensor packet from the stream
-    msg = vehicle._master.recv_match(type='DISTANCE_SENSOR', blocking=True, timeout=1.0)
-    if msg: # if we actually caught a real signal
-        return msg.current_distance / 100.0 # convert cm to meters
-    return 0.0 # return zero if the lidar is being a ghost
+# throttle settings i tuned
+THROTTLE_MIN = 1000   # motors off
+THROTTLE_IDLE = 1150  # props spinning but no lift
+THROTTLE_CLIMB = 1650 # power to lift off the floor
+THROTTLE_HOVER = 1500 # rough middle ground for holding height
 
-def arm_and_takeoff(vehicle, target_alt): # the sequence to get into the air
-    print("Pre-arm checks...") # logging the start
-    while not vehicle.is_armable: # loop until the sensors stop complaining
-        print(" Waiting for vehicle to initialize...") # printing status
-        time.sleep(1) # wait for hardware to settle
-        
-    print("Arming motors...") # telling it to spin the props
-    vehicle.mode = VehicleMode("GUIDED") # forcing guided mode so the code has control
-    vehicle.armed = True # flipping the arm switch
-    
-    while not vehicle.armed: # loop until it actually starts spinning
-        print(" Waiting for arming...") # logging the wait
-        time.sleep(1) # checking every second
-        
-    print("Taking off!") # shouting that we are lifting off
-    vehicle.simple_takeoff(target_alt) # sending the takeoff pulse
-    
-    while True: # loop to watch the climb
-        alt = get_lidar_alt(vehicle) # checking the lidar height
-        print(f" Altitude: {alt:.2f}m", end='\r') # print progress on one line
-        if alt >= target_alt * 0.95: # if we are at 95 percent height we stop
-            print(f"\nTarget altitude reached: {alt:.2f}m") # declare success
-            break # break the climb loop
-        time.sleep(0.5) # pause so we dont spam the console
+############################ the mavlink helpers i wrote
+
+def change_mode(master, mode: str): # changes the flight controller mode
+    mapping = master.mode_mapping() # ask for the list of modes
+    if mode not in mapping: # if the mode is fake
+        print(f"Unknown mode '{mode}'") # log the error
+        return # bail out
+    mode_id = mapping[mode] # find the secret mode id
+    master.mav.set_mode_send(master.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, mode_id) # blast it
+    print(f"Mode set: {mode}") # log the change
+    time.sleep(1) # wait for the mode to settle
+
+def arm_drone(master): # engages the scary drone motors
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 1, 0, 0, 0, 0, 0, 0 
+    )
+    print("Arming motors...") # log the arming
+    time.sleep(2) # wait for the spinning to start
+
+def disarm_drone(master): # stops the motors securely
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0, 0, 0, 0, 0, 0, 0, 0 
+    )
+    print("Disarmed.") # log the safety
+
+def set_throttle(master, pwm): # physically pushes the throttle via rc override
+    # channel 3 is the throttle in ardupilot
+    master.mav.rc_channels_override_send(
+        master.target_system, master.target_component,
+        0, 0, pwm, 0, 0, 0, 0, 0
+    )
+
+def get_lidar_alt(master): # checks the floor distance via lidar
+    msg = master.recv_match(type='DISTANCE_SENSOR', blocking=True, timeout=1.0) # wait for lidar packet
+    if msg: # if we got a real message
+        return msg.current_distance / 100.0 # return height in meters
+    return 0.0 # return zero if lidar is dead
+
+#################### the main mission 4 logic
 
 def main(): # the main boss function
     print("==========================================") # header
-    print("   UAV MISSION 4 - DRONEKIT EDITION") # title
+    print("   UAV MISSION 4 - CONFIRMED MAVLINK PATTERN") # title
     print("==========================================") # footer
     
-    # step 1: connect to the drone brain
-    print(f"Connecting to UAV at {CONNECTION_STRING}...") # logging connection
-    vehicle = connect(CONNECTION_STRING, wait_ready=True, baud=BAUD_RATE) # opening the dronekit link
-    
-    # step 2: start the radio link
-    print(f"Starting V2V Bridge on {ESP32_PORT}...") # logging radio start
-    bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge") # bridge object
-    try: # trying to open the wire
-        bridge.connect() # opening the serial port
-        bridge.send_message("MISSION 4: UAV AIRBORNE START") # yell over the air
-    except Exception as e: # if the radio is missing
-        print(f"Radio Fail: {e}") # log the fail
-        return # bail out
+    # step 1: connect to the wires
+    print(f"Connecting to Drone: {CONNECTION_STRING}...") # login
+    master = mavutil.mavlink_connection(CONNECTION_STRING, baud=BAUD_RATE) # open link
+    master.wait_heartbeat() # wait for buzz
+    print("Drone Heartbeat OK.") # success
 
-    try: # wrapping the mission in a try catch
-        # step 3: takeoff phase
-        arm_and_takeoff(vehicle, TARGET_ALT) # lift off the floor
+    bridge = v2v_bridge.V2VBridge(ESP32_PORT, name="UAV-Bridge") # radio bridge
+    try: # try to open radio
+        bridge.connect() # open serial wires
+        bridge.send_message("MISSION 4: MAVLINK MODE START") # yell over air
+    except: # if radio is missing
+        print("Radio Bridge Fail.") # log fail
+        return # bail
+
+    try: # wrapping mission in safety block
+        # step 2: takeoff sequence (using your working pattern)
+        change_mode(master, "STABILIZE") # switch to stabilize for manual throttle control
+        arm_drone(master) # start the props
         
-        # step 4: sync with rover
-        print("Waiting for UGV sync...") # logging the wait
-        while True: # loop until they talk
-            data = bridge.get_telemetry() # pull mailbox
-            if data: # if we got a real packet
-                print("UGV Synced. Commanding Circles!") # log coordination
-                break # stop waiting
-            time.sleep(1) # check every second
+        print("Climbing to 1.3m...") # log the climb
+        while True: # loop until target height
+            alt = get_lidar_alt(master) # check lidar
+            print(f" Altitude: {alt:.2f}m", end='\r') # log height
+            if alt >= TARGET_ALT: # if we hit the hover point
+                set_throttle(master, THROTTLE_HOVER) # pull back to hover power
+                print(f"\nHover altitude reached: {alt:.2f}m") # declare success
+                break # break the climb
+            set_throttle(master, THROTTLE_CLIMB) # keep pushing up
+            time.sleep(0.1) # quick loop
 
-        # step 5: command the maneuvers
-        print(">>> INITIATING UGV CIRCLE SEQUENCE") # starting the work
+        # step 3: sync with ground rover
+        print("Waiting for UGV sync...") # logging wait
+        while True: # loop until radio sync
+            data = bridge.get_telemetry() # pull from mailbox
+            if data: # if we got a packet
+                print("UGV Ready. Initiating Circles.") # log coordination
+                break # done
+            time.sleep(1) # wait a sec
+
+        # step 4: command the rover work
         bridge.send_command(cmdSeq=400, cmd=v2v_bridge.CMD_CIRCLE, estop=0) # blast command
         
-        start_mission = time.time() # start the clock
-        while (time.time() - start_mission) < CIRCLE_TIME: # loop for duration
+        start_t = time.time() # start clock
+        while (time.time() - start_t) < CIRCLE_TIME: # loop for duration
             data = bridge.get_telemetry() # check status
-            if data: # if we got one
-                v_mps = data[2] # pull speed
-                elapsed = time.time() - start_mission # calc time
-                print(f" Mission T+{elapsed:.1f}s | UGV Speed: {v_mps:.2f} m/s", end='\r') # log
-            time.sleep(0.5) # slow loop
+            if data: # if real status
+                print(f" UGV Speed: {data[2]:.2f} m/s", end='\r') # log rover stats
+            
+            # small "crude" altitude hold logic i added
+            alt = get_lidar_alt(master) # check lidar
+            if alt < TARGET_ALT - 0.1: # if we are sinking
+                set_throttle(master, THROTTLE_HOVER + 100) # give it more juice
+            elif alt > TARGET_ALT + 0.1: # if we are drifting too high
+                set_throttle(master, THROTTLE_HOVER - 100) # cut power
+            else: # if we are golden
+                set_throttle(master, THROTTLE_HOVER) # keep steady
+            
+            time.sleep(0.1) # 10hz loop
 
-        print("\nCIRCLE SEQUENCE COMPLETE.") # mission done
-        
-        # step 6: come home
-        print("Landing...") # start descent
-        vehicle.mode = VehicleMode("LAND") # force landing mode
-        while vehicle.armed: # loop while props are spinning
-            alt = get_lidar_alt(vehicle) # check height
-            print(f" Landing Alt: {alt:.2f}m", end='\r') # log progress
-            time.sleep(1) # check once a second
+        # step 5: land and shutdown
+        print("\nLanding...") # start descent
+        while True: # loop until we hit the floor
+            alt = get_lidar_alt(master) # check lidar
+            print(f" Land Alt: {alt:.2f}m", end='\r') # log altitude
+            if alt < 0.2: # if we are barely off the floor
+                set_throttle(master, THROTTLE_IDLE) # cut to idle
+                print("\nTouchdown confirmed.") # log success
+                break # exit
+            set_throttle(master, THROTTLE_HOVER - 150) # slow descent power
+            time.sleep(0.1) # quick loop
 
-    except KeyboardInterrupt: # if someone hits ctrl+c
-        print("\nEmergency Interruption!") # log panic
-        vehicle.mode = VehicleMode("LAND") # force land anyway
-    finally: # always do cleanup
+        time.sleep(1) # let it settle
+        set_throttle(master, 0) # release rc override control
+        disarm_drone(master) # stop the props
+
+    except KeyboardInterrupt: # panics
+        print("\nABORT: Emergency Cleanup...") # abort log
+        set_throttle(master, THROTTLE_IDLE) # cut power
+        time.sleep(0.5) # settle
+        set_throttle(master, 0) # release control
+        disarm_drone(master) # stop props
+    finally: # final chores
         bridge.stop() # close radio wire
-        vehicle.close() # close drone link
-        print("System shutdown. Mission closed.") # final log
+        print("Mission finalized.") # end log
 
-if __name__ == "__main__": # standard entry point
-    main() # run the whole show
+if __name__ == "__main__": # entry point
+    main() # run it
