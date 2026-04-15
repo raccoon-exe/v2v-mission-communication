@@ -169,25 +169,15 @@ print("Waiting for heartbeats from UAV...")
 master.wait_heartbeat()
 print("Heartbeat received!")
 
-def send_rc_override(roll=1500, pitch=1500, throttle=1500, yaw=1500):
+def send_landing_target(x_b, y_b, z_b):
     """
-    Force motor response by literally hijacking the RC controller mathematically!
-    1500 is perfectly centered sticks.
+    Safely sends targets to ArduPilot's native PLND library (GPS-Denied Safe).
+    ArduPilot natively ignores these if target tracking is lost, preventing flyaways.
     """
-    rc_channel_values = [65535 for _ in range(18)]
-    rc_channel_values[0] = int(roll)     # CH1: Roll
-    rc_channel_values[1] = int(pitch)    # CH2: Pitch
-    rc_channel_values[2] = int(throttle) # CH3: Throttle
-    rc_channel_values[3] = int(yaw)      # CH4: Yaw
-    
-    master.mav.rc_channels_override_send(
-        master.target_system, master.target_component,
-        *rc_channel_values
+    master.mav.landing_target_send(
+        int(time.time() * 1e6), 0, mavutil.mavlink.MAV_FRAME_BODY_FRD, 0.0, 0.0,
+        abs(z_b), 0.0, 0.0, x_b, y_b, abs(z_b), (1.0, 0.0, 0.0, 0.0), 0, 1
     )
-
-def release_rc_override():
-    """ Release control back to your physical remote """
-    send_rc_override(0, 0, 0, 0)
 
 def change_mode(mode_name: str):
     mode_id = master.mode_mapping().get(mode_name)
@@ -227,14 +217,22 @@ def main():
 
     estimator = ArucoDistanceEstimator(cam.camera_matrix, cam.dist_coeffs, aruco.DICT_6X6_1000)
 
-    state = "APPROACH"
+    # FLOW STATE MACHINE
+    state = "TAKEOFF"
     stable_count = 0
     last_send = 0.0
 
-    print(">>> DESK TESTING ACTIVE: Hijacking raw motor PWM channels via Camera!")
-    print(">>> Pick up your RC Remote. Switch to ALT_HOLD and literally gently push the Throttle to arm the motors.")
+    print("=================================================================")
+    print(">>> REAL FLIGHT MODE ACTIVE (GPS-DENIED SAFE)")
+    print(">>> Drone will forcefully TAKE OFF to 2.0 meters!")
+    print(">>> Ensure props are ON and you are clear of the drone.")
+    print("=================================================================")
     
     try:
+        change_mode("GUIDED")
+        arm_and_takeoff(TARGET_HEIGHT_M)
+        state = "APPROACH"
+
         while True:
             frame = cam.get_frame()
             if frame is None:
@@ -286,55 +284,42 @@ def main():
                 cv2.putText(frame, f"TRACKING ID: {marker_id_to_use}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(frame, f"XYZ: [{x_b:.2f}, {y_b:.2f}, {z_b:.2f}]", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                # 2. Control Logic: RAW RC OVERRIDES limits constraints
-                # If target is far right (y_b > 0), roll right (PWM > 1500)
-                # If target is far forward (x_b > 0), pitch forward (PWM < 1500)
-                Kp_rc = 200.0  # Aggressiveness multiplier
-                
-                req_roll = 1500 + int(y_b * Kp_rc)
-                req_pitch = 1500 - int(x_b * Kp_rc)
-
-                # Clamp values so it doesn't violently flip (Range: 1300 to 1700)
-                req_roll = max(1300, min(1700, req_roll))
-                req_pitch = max(1300, min(1700, req_pitch))
-                
-                # Boost throttle slightly above idle so motors spool up audibly
-                req_throttle = 1550 
-
+                # 2. Control Logic: Native Precision Landing
+                # Only broadcast target mathematically. ArduPilot's native flight modes
+                # (LOITER and LAND) will internally handle all crash-prevention and PIDs.
                 now = time.time()
                 if now - last_send >= (1.0 / SEND_HZ):
-                    send_rc_override(roll=req_roll, pitch=req_pitch, throttle=req_throttle, yaw=1500)
+                    send_landing_target(x_b, y_b, z_b)
                     last_send = now
 
             else:
                 stable_count = 0
-                cv2.putText(frame, "TARGET LOST - STICKS CENTERED", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.putText(frame, "TARGET LOST - HOVERING SAFELY", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 
-                now = time.time()
-                if now - last_send >= (1.0 / SEND_HZ):
-                    send_rc_override(1500, 1500, 1500, 1500) # Center sticks!
-                    last_send = now
-
             # STATE MACHINE (Transitions)
             if state == "APPROACH":
                 if stable_count >= PLND_STABLE_FRAMES:
-                    print(">>> Target stably held. Engaging GUIDED Velocity Lock!")
+                    print(">>> Target stably held. Switching to LOITER to engage optical centering!")
+                    change_mode("LOITER")
                     state = "PREC_LOITER"
             
             elif state == "PREC_LOITER":
                 if stable_count == 0:
-                    state = "APPROACH"
+                    state = "APPROACH"  # Will switch back to GUIDED hover natively? Actually staying in LOITER is safer if lost.
                 elif found and target_eb is not None:
                     err_m = math.sqrt(target_eb[0]**2 + target_eb[1]**2)
                     cv2.putText(frame, f"Align Err: {err_m:.2f}m", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     
                     if err_m < LAND_LATERAL_ERR_M:
-                        print(">>> Aligned perfectly! Forcing descend velocity!")
+                        print(">>> Aligned flawlessly! Engaging LAND mode. ArduPilot takes over descent!")
+                        change_mode("LAND")
                         state = "LANDING"
             
             elif state == "LANDING":
+                # In LAND mode, ArduPilot will detect physical touchdown using its accelerometers
+                # and automatically disarm exactly as we saw in the desk test!
                 if not master.motors_armed():
-                    print(">>> TOUCHDOWN DETECTED. DISARMED.")
+                    print(">>> TOUCHDOWN AUTO-DISARM CONFIRMED. LANDING COMPLETE.")
                     state = "LANDED"
                     break
             
@@ -344,9 +329,11 @@ def main():
                 break
 
     finally:
-        print("Cleaning up system and returning remote control back to human...")
-        release_rc_override()
+        print("Cleaning up system...")
         cam.close()
+        if state != "LANDED":
+            # If interrupted, fallback to a safe hover!
+            change_mode("LOITER")
 
 if __name__ == "__main__":
     main()
