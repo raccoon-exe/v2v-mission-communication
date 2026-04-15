@@ -209,9 +209,11 @@ def change_mode(mode_name: str):
     master.set_mode(mode_id)
     return True
 
-def get_rel_alt_m():
-    msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=False)
-    if msg: return msg.relative_alt / 1000.0
+def get_lidar_distance_m():
+    """ Actively pulls hardware pings from the Lidar Lite V3 """
+    msg = master.recv_match(type='DISTANCE_SENSOR', blocking=False)
+    if msg:
+        return float(msg.current_distance) / 100.0  # cm to meters
     return None
 
 def arm_and_takeoff(alt):
@@ -331,7 +333,17 @@ def main():
                             vz = 0.0
                             
                             if state == "LANDING":
-                                vz = 0.4 # Slowly descend while centering
+                                # Utilize Lidar Lite V3 to dynamically adjust descent safely!
+                                lidar_m = get_lidar_distance_m()
+                                if lidar_m is not None:
+                                    # Scale speed smoothly using laser altitude! 
+                                    # Very slow (0.1m/s) if < 1m to gently kiss the platform.
+                                    # Max speed (0.4m/s) if higher up.
+                                    vz = max(0.15, min(0.4, lidar_m * 0.3))
+                                    cv2.putText(frame, f"LIDAR Z: {lidar_m:.2f}m", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                                else:
+                                    vz = 0.4 # Fallback
+                                    cv2.putText(frame, "LIDAR N/A - BLIND DESCENT", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                             
                             send_guided_velocity(vx, vy, vz)
                             send_landing_target(x_b, y_b, z_b) # Supplement the math for EKF logging
