@@ -232,22 +232,27 @@ def main():
 
             draw_crosshair(frame)
 
-            # Check height to decide which marker to track
-            rel_alt = get_rel_alt_m()
-            if rel_alt is None: rel_alt = 2.0
-
-            marker_id_to_use = LARGE_MARKER_ID
-            marker_size_m_to_use = LARGE_MARKER_SIZE
-            if rel_alt < USE_SMALL_BELOW_M:
-                marker_id_to_use = SMALL_MARKER_ID
-                marker_size_m_to_use = SMALL_MARKER_SIZE
-
-            poses = estimator.detect_markers(frame, marker_size_m_to_use)
+            # Detect all markers, using Large Marker size to start
+            poses = estimator.detect_markers(frame, LARGE_MARKER_SIZE)
             
             found = False
             target_eb = None
+            marker_id_to_use = None
+            marker_size_m_to_use = None
 
-            if marker_id_to_use in poses:
+            # Priority 1: Check if the Small Marker is visible
+            if SMALL_MARKER_ID in poses:
+                # Re-estimate properly with small marker size
+                poses = estimator.detect_markers(frame, SMALL_MARKER_SIZE)
+                if SMALL_MARKER_ID in poses:
+                    marker_id_to_use = SMALL_MARKER_ID
+                    marker_size_m_to_use = SMALL_MARKER_SIZE
+            # Priority 2: Fallback to Large Marker
+            elif LARGE_MARKER_ID in poses:
+                marker_id_to_use = LARGE_MARKER_ID
+                marker_size_m_to_use = LARGE_MARKER_SIZE
+
+            if marker_id_to_use is not None and marker_id_to_use in poses:
                 pose = poses[marker_id_to_use]
                 # Convert ZED/Webcam standard frame XYZ to ArduPilot FRD body frame
                 x_cam, y_cam, z_cam = float(pose.tvec[0]), float(pose.tvec[1]), float(pose.tvec[2])
@@ -278,7 +283,8 @@ def main():
             # STATE MACHINE LOGIC
             if state == "APPROACH":
                 if stable_count >= PLND_STABLE_FRAMES:
-                    print(">>> Target stable. Engaging GUIDED HOLD.")
+                    print(">>> Target stably held. Switching to LOITER to engage Precision Target tracking!")
+                    change_mode("LOITER")
                     state = "PREC_LOITER"
             
             elif state == "PREC_LOITER":
