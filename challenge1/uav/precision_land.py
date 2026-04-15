@@ -169,22 +169,25 @@ print("Waiting for heartbeats from UAV...")
 master.wait_heartbeat()
 print("Heartbeat received!")
 
-def send_guided_velocity(vx, vy, vz):
+def send_rc_override(roll=1500, pitch=1500, throttle=1500, yaw=1500):
     """
-    Directly force drone velocities in GUIDED mode (Body Frame).
-    vx = Forward velocity (m/s)
-    vy = Right velocity (m/s)
-    vz = Down velocity (m/s)
+    Force motor response by literally hijacking the RC controller mathematically!
+    1500 is perfectly centered sticks.
     """
-    master.mav.set_position_target_local_ned_send(
-        0, master.target_system, master.target_component,
-        mavutil.mavlink.MAV_FRAME_BODY_NED,
-        0b0000111111000111, # bitmask: only use velocity
-        0, 0, 0,            # x, y, z positions (ignored)
-        vx, vy, vz,         # vx, vy, vz velocities
-        0, 0, 0,            # x, y, z accelerations (ignored)
-        0, 0                # yaw, yaw_rate (ignored)
+    rc_channel_values = [65535 for _ in range(18)]
+    rc_channel_values[0] = int(roll)     # CH1: Roll
+    rc_channel_values[1] = int(pitch)    # CH2: Pitch
+    rc_channel_values[2] = int(throttle) # CH3: Throttle
+    rc_channel_values[3] = int(yaw)      # CH4: Yaw
+    
+    master.mav.rc_channels_override_send(
+        master.target_system, master.target_component,
+        *rc_channel_values
     )
+
+def release_rc_override():
+    """ Release control back to your physical remote """
+    send_rc_override(0, 0, 0, 0)
 
 def change_mode(mode_name: str):
     mode_id = master.mode_mapping().get(mode_name)
@@ -224,18 +227,14 @@ def main():
 
     estimator = ArucoDistanceEstimator(cam.camera_matrix, cam.dist_coeffs, aruco.DICT_6X6_1000)
 
-    # STATE MACHINE
-    state = "TAKEOFF"
+    state = "APPROACH"
     stable_count = 0
     last_send = 0.0
 
-    print("Starting Automated Precision Landing Sequence...")
-    print(">>> Drone will automatically Arm and Takeoff to 2.0m!")
+    print(">>> DESK TESTING ACTIVE: Hijacking raw motor PWM channels via Camera!")
+    print(">>> Pick up your RC Remote. Switch to ALT_HOLD and literally gently push the Throttle to arm the motors.")
+    
     try:
-        change_mode("GUIDED")
-        arm_and_takeoff(TARGET_HEIGHT_M)
-        state = "APPROACH"
-        
         while True:
             frame = cam.get_frame()
             if frame is None:
@@ -287,35 +286,33 @@ def main():
                 cv2.putText(frame, f"TRACKING ID: {marker_id_to_use}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(frame, f"XYZ: [{x_b:.2f}, {y_b:.2f}, {z_b:.2f}]", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                # 2. Control Logic: Velocity P-Controller
-                if state in ["APPROACH", "PREC_LOITER", "LANDING"]:
-                    # Proportional Gain (how aggressive it chases)
-                    Kp = 1.0  
-                    vx = float(x_b) * Kp
-                    vy = float(y_b) * Kp
-                    vz = 0.0  # Default to holding altitude
-                    
-                    # Clamp velocities safely
-                    max_speed = 1.5
-                    vx = max(-max_speed, min(max_speed, vx))
-                    vy = max(-max_speed, min(max_speed, vy))
+                # 2. Control Logic: RAW RC OVERRIDES limits constraints
+                # If target is far right (y_b > 0), roll right (PWM > 1500)
+                # If target is far forward (x_b > 0), pitch forward (PWM < 1500)
+                Kp_rc = 200.0  # Aggressiveness multiplier
+                
+                req_roll = 1500 + int(y_b * Kp_rc)
+                req_pitch = 1500 - int(x_b * Kp_rc)
 
-                    now = time.time()
-                    if now - last_send >= (1.0 / SEND_HZ):
-                        if state == "LANDING":
-                            vz = 0.5  # Slowly descend while aligning!
-                        
-                        send_guided_velocity(vx, vy, vz)
-                        last_send = now
+                # Clamp values so it doesn't violently flip (Range: 1300 to 1700)
+                req_roll = max(1300, min(1700, req_roll))
+                req_pitch = max(1300, min(1700, req_pitch))
+                
+                # Boost throttle slightly above idle so motors spool up audibly
+                req_throttle = 1550 
+
+                now = time.time()
+                if now - last_send >= (1.0 / SEND_HZ):
+                    send_rc_override(roll=req_roll, pitch=req_pitch, throttle=req_throttle, yaw=1500)
+                    last_send = now
 
             else:
                 stable_count = 0
-                cv2.putText(frame, "TARGET LOST - HOVERING", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.putText(frame, "TARGET LOST - STICKS CENTERED", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 
-                # Halt the drone if it loses sight
                 now = time.time()
-                if now - last_send >= (1.0 / SEND_HZ) and state in ["APPROACH", "PREC_LOITER"]:
-                    send_guided_velocity(0.0, 0.0, 0.0)
+                if now - last_send >= (1.0 / SEND_HZ):
+                    send_rc_override(1500, 1500, 1500, 1500) # Center sticks!
                     last_send = now
 
             # STATE MACHINE (Transitions)
@@ -347,10 +344,9 @@ def main():
                 break
 
     finally:
-        print("Cleaning up system...")
+        print("Cleaning up system and returning remote control back to human...")
+        release_rc_override()
         cam.close()
-        if state != "LANDED":
-            change_mode("GUIDED")
 
 if __name__ == "__main__":
     main()
