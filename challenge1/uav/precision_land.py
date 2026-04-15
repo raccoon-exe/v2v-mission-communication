@@ -169,10 +169,21 @@ print("Waiting for heartbeats from UAV...")
 master.wait_heartbeat()
 print("Heartbeat received!")
 
-def send_landing_target(x_b, y_b, z_b):
-    master.mav.landing_target_send(
-        int(time.time() * 1e6), 0, mavutil.mavlink.MAV_FRAME_BODY_FRD, 0.0, 0.0,
-        abs(z_b), 0.0, 0.0, x_b, y_b, abs(z_b), (1.0, 0.0, 0.0, 0.0), 0, 1
+def send_guided_velocity(vx, vy, vz):
+    """
+    Directly force drone velocities in GUIDED mode (Body Frame).
+    vx = Forward velocity (m/s)
+    vy = Right velocity (m/s)
+    vz = Down velocity (m/s)
+    """
+    master.mav.set_position_target_local_ned_send(
+        0, master.target_system, master.target_component,
+        mavutil.mavlink.MAV_FRAME_BODY_NED,
+        0b0000111111000111, # bitmask: only use velocity
+        0, 0, 0,            # x, y, z positions (ignored)
+        vx, vy, vz,         # vx, vy, vz velocities
+        0, 0, 0,            # x, y, z accelerations (ignored)
+        0, 0                # yaw, yaw_rate (ignored)
     )
 
 def change_mode(mode_name: str):
@@ -261,30 +272,56 @@ def main():
                 z_b = z_cam   # Down
                 target_eb = (x_b, y_b, z_b)
 
-                now = time.time()
-                if now - last_send >= (1.0 / SEND_HZ):
-                    send_landing_target(x_b, y_b, z_b)
-                    last_send = now
-
+                # 1. Visualization: Draw targeting line from camera center to marker center
+                cam_cx, cam_cy = frame.shape[1] // 2, frame.shape[0] // 2
+                marker_cx, marker_cy = pose.center_px
+                cv2.line(frame, (cam_cx, cam_cy), (marker_cx, marker_cy), (0, 0, 255), 4)
+                
                 stable_count += 1
                 found = True
 
-                # Visualization Overlay
                 corners_arr = [pose.corners.reshape(1, 4, 2).astype(np.float32)]
                 aruco.drawDetectedMarkers(frame, corners_arr, np.array([[marker_id_to_use]]))
                 cv2.drawFrameAxes(frame, cam.camera_matrix, cam.dist_coeffs, pose.rvec, pose.tvec.reshape(3, 1), marker_size_m_to_use * 0.5)
 
                 cv2.putText(frame, f"TRACKING ID: {marker_id_to_use}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(frame, f"XYZ: [{x_b:.2f}, {y_b:.2f}, {z_b:.2f}]", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                # 2. Control Logic: Velocity P-Controller
+                if state in ["APPROACH", "PREC_LOITER", "LANDING"]:
+                    # Proportional Gain (how aggressive it chases)
+                    Kp = 1.0  
+                    vx = float(x_b) * Kp
+                    vy = float(y_b) * Kp
+                    vz = 0.0  # Default to holding altitude
+                    
+                    # Clamp velocities safely
+                    max_speed = 1.5
+                    vx = max(-max_speed, min(max_speed, vx))
+                    vy = max(-max_speed, min(max_speed, vy))
+
+                    now = time.time()
+                    if now - last_send >= (1.0 / SEND_HZ):
+                        if state == "LANDING":
+                            vz = 0.5  # Slowly descend while aligning!
+                        
+                        send_guided_velocity(vx, vy, vz)
+                        last_send = now
+
             else:
                 stable_count = 0
-                cv2.putText(frame, "TARGET LOST", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.putText(frame, "TARGET LOST - HOVERING", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                
+                # Halt the drone if it loses sight
+                now = time.time()
+                if now - last_send >= (1.0 / SEND_HZ) and state in ["APPROACH", "PREC_LOITER"]:
+                    send_guided_velocity(0.0, 0.0, 0.0)
+                    last_send = now
 
-            # STATE MACHINE LOGIC
+            # STATE MACHINE (Transitions)
             if state == "APPROACH":
                 if stable_count >= PLND_STABLE_FRAMES:
-                    print(">>> Target stably held. Switching to LOITER to engage Precision Target tracking!")
-                    change_mode("LOITER")
+                    print(">>> Target stably held. Engaging GUIDED Velocity Lock!")
                     state = "PREC_LOITER"
             
             elif state == "PREC_LOITER":
@@ -295,8 +332,7 @@ def main():
                     cv2.putText(frame, f"Align Err: {err_m:.2f}m", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     
                     if err_m < LAND_LATERAL_ERR_M:
-                        print(">>> Aligned perfectly! Switching to LAND limit.")
-                        change_mode("LAND")
+                        print(">>> Aligned perfectly! Forcing descend velocity!")
                         state = "LANDING"
             
             elif state == "LANDING":
