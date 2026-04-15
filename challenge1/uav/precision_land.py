@@ -18,6 +18,10 @@ from pymavlink import mavutil
 MAVLINK_CONN = "/dev/ttyACM0"      # Or udp:127.0.0.1:14550
 BAUD_RATE    = 921600
 
+# 🔴 IMPORTANT: Set this to False when you go outside to actually fly!
+# When True, it violently spoofs RC controllers to force motor sounds on your desk.
+DESK_TESTING_NO_PROPELLERS = True
+
 # Nested ArUco Marker Setup
 LARGE_MARKER_ID   = 5
 SMALL_MARKER_ID   = 6
@@ -179,6 +183,18 @@ def send_landing_target(x_b, y_b, z_b):
         abs(z_b), 0.0, 0.0, x_b, y_b, abs(z_b), (1.0, 0.0, 0.0, 0.0), 0, 1
     )
 
+def send_rc_override(roll=1500, pitch=1500, throttle=1500, yaw=1500):
+    """ Forcefully bypass ArduPilot's 'Not Flying' safety state for desk testing """
+    rc_channel_values = [65535 for _ in range(18)]
+    rc_channel_values[0] = int(roll)
+    rc_channel_values[1] = int(pitch)
+    rc_channel_values[2] = int(throttle)
+    rc_channel_values[3] = int(yaw)
+    master.mav.rc_channels_override_send(master.target_system, master.target_component, *rc_channel_values)
+
+def release_rc_override():
+    send_rc_override(0, 0, 0, 0)
+
 def change_mode(mode_name: str):
     mode_id = master.mode_mapping().get(mode_name)
     if mode_id is None: return False
@@ -217,22 +233,25 @@ def main():
 
     estimator = ArucoDistanceEstimator(cam.camera_matrix, cam.dist_coeffs, aruco.DICT_6X6_1000)
 
-    # FLOW STATE MACHINE
-    state = "TAKEOFF"
+    state = "APPROACH"
     stable_count = 0
     last_send = 0.0
 
     print("=================================================================")
-    print(">>> REAL FLIGHT MODE ACTIVE (GPS-DENIED SAFE)")
-    print(">>> Drone will forcefully TAKE OFF to 2.0 meters!")
-    print(">>> Ensure props are ON and you are clear of the drone.")
+    if DESK_TESTING_NO_PROPELLERS:
+        print(">>> [WARNING] DESK TESTING MODE ACTIVE (NO PROPS)")
+        print(">>> Hijacking raw RC limits to force motors to spin on your desk.")
+        print(">>> 1. Put drone in ALT_HOLD and forcefully push throttle up via your RC.")
+        print(">>> 2. The script will rip the sticks from your hand virtually!")
+    else:
+        print(">>> [✓] REAL FLIGHT MODE ACTIVE (GPS-DENIED SAFE)")
+        print(">>> Taking off heavily with GUIDED -> LOITER -> LAND pipeline.")
+        print(">>> Back away from the drone quickly!")
+        change_mode("GUIDED")
+        arm_and_takeoff(TARGET_HEIGHT_M)
     print("=================================================================")
     
     try:
-        change_mode("GUIDED")
-        arm_and_takeoff(TARGET_HEIGHT_M)
-        state = "APPROACH"
-
         while True:
             frame = cam.get_frame()
             if frame is None:
@@ -284,18 +303,29 @@ def main():
                 cv2.putText(frame, f"TRACKING ID: {marker_id_to_use}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(frame, f"XYZ: [{x_b:.2f}, {y_b:.2f}, {z_b:.2f}]", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                # 2. Control Logic: Native Precision Landing
-                # Only broadcast target mathematically. ArduPilot's native flight modes
-                # (LOITER and LAND) will internally handle all crash-prevention and PIDs.
                 now = time.time()
                 if now - last_send >= (1.0 / SEND_HZ):
-                    send_landing_target(x_b, y_b, z_b)
+                    if DESK_TESTING_NO_PROPELLERS:
+                        # Force motor spin mechanically
+                        req_roll = max(1300, min(1700, 1500 + int(y_b * 200.0)))
+                        req_pitch = max(1300, min(1700, 1500 - int(x_b * 200.0)))
+                        send_rc_override(roll=req_roll, pitch=req_pitch, throttle=1550)
+                    else:
+                        # Flight mode native controller
+                        send_landing_target(x_b, y_b, z_b)
+                        
                     last_send = now
 
             else:
                 stable_count = 0
-                cv2.putText(frame, "TARGET LOST - HOVERING SAFELY", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                
+                now = time.time()
+                if now - last_send >= (1.0 / SEND_HZ):
+                    if DESK_TESTING_NO_PROPELLERS:
+                        cv2.putText(frame, "TARGET LOST - STICKS CENTERED", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        send_rc_override(1500, 1500, 1500, 1500)
+                    else:
+                        cv2.putText(frame, "TARGET LOST - HOVERING SAFELY", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    last_send = now
             # STATE MACHINE (Transitions)
             if state == "APPROACH":
                 if stable_count >= PLND_STABLE_FRAMES:
@@ -330,8 +360,10 @@ def main():
 
     finally:
         print("Cleaning up system...")
+        if DESK_TESTING_NO_PROPELLERS:
+            release_rc_override()
         cam.close()
-        if state != "LANDED":
+        if not DESK_TESTING_NO_PROPELLERS and state != "LANDED":
             # If interrupted, fallback to a safe hover!
             change_mode("LOITER")
 
