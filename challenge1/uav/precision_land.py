@@ -174,13 +174,21 @@ master.wait_heartbeat()
 print("Heartbeat received!")
 
 def send_landing_target(x_b, y_b, z_b):
-    """
-    Safely sends targets to ArduPilot's native PLND library (GPS-Denied Safe).
-    ArduPilot natively ignores these if target tracking is lost, preventing flyaways.
-    """
+    """ Secondary: Broadcasts absolute marker target relative to flow """
     master.mav.landing_target_send(
         int(time.time() * 1e6), 0, mavutil.mavlink.MAV_FRAME_BODY_FRD, 0.0, 0.0,
         abs(z_b), 0.0, 0.0, x_b, y_b, abs(z_b), (1.0, 0.0, 0.0, 0.0), 0, 1
+    )
+
+def send_guided_velocity(vx, vy, vz):
+    """ Primary Flight: Smooth, safe, velocity vectors directly forcing the PIDs! """
+    master.mav.set_position_target_local_ned_send(
+        0, master.target_system, master.target_component,
+        mavutil.mavlink.MAV_FRAME_BODY_NED,
+        0b0000111111000111,
+        0, 0, 0,
+        vx, vy, vz,
+        0, 0, 0, 0, 0
     )
 
 def send_rc_override(roll=1500, pitch=1500, throttle=1500, yaw=1500):
@@ -244,8 +252,8 @@ def main():
         print(">>> 1. Put drone in ALT_HOLD and forcefully push throttle up via your RC.")
         print(">>> 2. The script will rip the sticks from your hand virtually!")
     else:
-        print(">>> [✓] REAL FLIGHT MODE ACTIVE (GPS-DENIED SAFE)")
-        print(">>> Taking off heavily with GUIDED -> LOITER -> LAND pipeline.")
+        print(">>> [✓] REAL FLIGHT MODE ACTIVE (GPS-DENIED SAFE VELOCITY CONTROLLER)")
+        print(">>> Drone taking off in GUIDED -> Forcing Visual Center -> LAND.")
         print(">>> Back away from the drone quickly!")
         change_mode("GUIDED")
         arm_and_takeoff(TARGET_HEIGHT_M)
@@ -306,13 +314,27 @@ def main():
                 now = time.time()
                 if now - last_send >= (1.0 / SEND_HZ):
                     if DESK_TESTING_NO_PROPELLERS:
-                        # Force motor spin mechanically
                         req_roll = max(1300, min(1700, 1500 + int(y_b * 200.0)))
                         req_pitch = max(1300, min(1700, 1500 - int(x_b * 200.0)))
                         send_rc_override(roll=req_roll, pitch=req_pitch, throttle=1550)
                     else:
-                        # Flight mode native controller
-                        send_landing_target(x_b, y_b, z_b)
+                        # Flight mode safe controller! Extremely similar to your friend's 
+                        # moveToCenter2.py script. Command velocity directly in GUIDED mode!
+                        if state in ["APPROACH", "PREC_LOITER", "LANDING"]:
+                            Kp = 0.8
+                            vx = float(x_b) * Kp
+                            vy = float(y_b) * Kp
+                            
+                            # Hard clamp safety speeds (0.8 m/sec is walking pace)
+                            vx = max(-0.8, min(0.8, vx))
+                            vy = max(-0.8, min(0.8, vy))
+                            vz = 0.0
+                            
+                            if state == "LANDING":
+                                vz = 0.4 # Slowly descend while centering
+                            
+                            send_guided_velocity(vx, vy, vz)
+                            send_landing_target(x_b, y_b, z_b) # Supplement the math for EKF logging
                         
                     last_send = now
 
@@ -324,30 +346,30 @@ def main():
                         cv2.putText(frame, "TARGET LOST - STICKS CENTERED", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                         send_rc_override(1500, 1500, 1500, 1500)
                     else:
-                        cv2.putText(frame, "TARGET LOST - HOVERING SAFELY", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        cv2.putText(frame, "TARGET LOST - BRAKING TO HOVER", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        send_guided_velocity(0.0, 0.0, 0.0) # Break and hover!
                     last_send = now
             # STATE MACHINE (Transitions)
             if state == "APPROACH":
                 if stable_count >= PLND_STABLE_FRAMES:
-                    print(">>> Target stably held. Switching to LOITER to engage optical centering!")
-                    change_mode("LOITER")
+                    print(">>> Target stably held. Engaging GUIDED Velocity Tracking!")
+                    change_mode("GUIDED")
                     state = "PREC_LOITER"
             
             elif state == "PREC_LOITER":
                 if stable_count == 0:
-                    state = "APPROACH"  # Will switch back to GUIDED hover natively? Actually staying in LOITER is safer if lost.
+                    state = "APPROACH"  
                 elif found and target_eb is not None:
                     err_m = math.sqrt(target_eb[0]**2 + target_eb[1]**2)
                     cv2.putText(frame, f"Align Err: {err_m:.2f}m", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     
                     if err_m < LAND_LATERAL_ERR_M:
-                        print(">>> Aligned flawlessly! Engaging LAND mode. ArduPilot takes over descent!")
-                        change_mode("LAND")
+                        print(">>> Aligned flawlessly! Engaging Direct Velocity Descent!")
+                        # Notice we STAY in GUIDED mode!
                         state = "LANDING"
             
             elif state == "LANDING":
-                # In LAND mode, ArduPilot will detect physical touchdown using its accelerometers
-                # and automatically disarm exactly as we saw in the desk test!
+                # Wait for Touchdown
                 if not master.motors_armed():
                     print(">>> TOUCHDOWN AUTO-DISARM CONFIRMED. LANDING COMPLETE.")
                     state = "LANDED"
@@ -362,10 +384,9 @@ def main():
         print("Cleaning up system...")
         if DESK_TESTING_NO_PROPELLERS:
             release_rc_override()
+        else:
+            send_guided_velocity(0.0, 0.0, 0.0) # Hover brake!
         cam.close()
-        if not DESK_TESTING_NO_PROPELLERS and state != "LANDED":
-            # If interrupted, fallback to a safe hover!
-            change_mode("LOITER")
 
 if __name__ == "__main__":
     main()
