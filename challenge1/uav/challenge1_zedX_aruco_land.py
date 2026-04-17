@@ -48,6 +48,8 @@ MAVLINK_BAUD = 921600
 # Marker settings
 MARKER_ID = 5
 MARKER_SIZE_M = 0.3048  # (12 inches)
+SMALL_MARKER_ID = 6
+SMALL_MARKER_SIZE_M = 0.1016 # (4 inches) - Critically prevents FOV clipping at low altitudes!
 
 # Camera mounting assumption
 # True  = top of the camera image points toward the front of the drone
@@ -83,7 +85,7 @@ MARKER_LOST_HOLD_S = 0.50
 MIN_STABLE_FRAMES = 8
 
 # ZED camera settings
-ZED_RESOLUTION = sl.RESOLUTION.HD720
+ZED_RESOLUTION = sl.RESOLUTION.HD1080  # ZED X required global shutter map
 ZED_FPS = 30
 
 # Display
@@ -150,6 +152,22 @@ def disarm_vehicle(master):
     print("[INFO] Disarming vehicle...")
     master.arducopter_disarm()
     time.sleep(1.0)
+
+def disable_ugv_avoidance(master):
+    """
+    CRITICAL FIX: Turns off ArduPilot Object/Proximity Avoidance.
+    If left on, the drone sees the UGV as a collidable wall and gracefully
+    slides sideways to land in the dirt. We must kill this parameter!
+    """
+    print("[INFO] Force-disabling AVOID_ENABLE so the Drone doesn't dodge the UGV")
+    try:
+        master.mav.param_set_send(
+            master.target_system, master.target_component,
+            b'AVOID_ENABLE', 0, mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+        )
+        time.sleep(0.5)
+    except:
+        pass
 
 
 def takeoff(master, altitude_m):
@@ -238,7 +256,7 @@ def wait_until_altitude(master, target_alt_m, timeout_s):
 
 def open_zed():
     """
-    I open the ZED 2i and retrieve the left image stream plus calibration.
+    I open the ZED X and retrieve the left image stream plus calibration.
     """
     zed = sl.Camera()
 
@@ -250,7 +268,7 @@ def open_zed():
 
     status = zed.open(init_params)
     if status != sl.ERROR_CODE.SUCCESS:
-        raise RuntimeError(f"Failed to open ZED: {status}")
+        raise RuntimeError(f"Failed to open ZED X: {status}")
 
     runtime_params = sl.RuntimeParameters()
     image_mat = sl.Mat()
@@ -267,7 +285,7 @@ def open_zed():
     # OpenCV expects a distortion vector.
     dist_coeffs = np.array(left_calib.disto[:5], dtype=np.float32)
 
-    print("[INFO] ZED 2i opened")
+    print("[INFO] ZED X opened")
     print("[INFO] Camera matrix:")
     print(camera_matrix)
 
@@ -377,6 +395,8 @@ def camera_pose_to_body_errors(tvec):
 
 def main():
     master = connect_mavlink()
+    disable_ugv_avoidance(master) # Ensure drone doesn't dodge UGV!
+    
     zed, runtime_params, image_mat, camera_matrix, dist_coeffs = open_zed()
     detect_markers = create_aruco_detector()
 
@@ -406,9 +426,19 @@ def main():
             continue
 
         corners, ids, _ = detect_markers(frame)
+        
+        # Priority 1: Search for the nested 4-inch marker (crucial to prevent FOV clipping at the bottom!)
+        used_id = SMALL_MARKER_ID
         found, tvec, marker_corners = estimate_single_marker_pose(
-            corners, ids, camera_matrix, dist_coeffs, MARKER_ID, MARKER_SIZE_M
+            corners, ids, camera_matrix, dist_coeffs, SMALL_MARKER_ID, SMALL_MARKER_SIZE_M
         )
+        
+        # Priority 2: Fallback to the 12-inch marker for high-altitude tracing
+        if not found:
+            used_id = MARKER_ID
+            found, tvec, marker_corners = estimate_single_marker_pose(
+                corners, ids, camera_matrix, dist_coeffs, MARKER_ID, MARKER_SIZE_M
+            )
 
         now = time.time()
 
@@ -443,7 +473,7 @@ def main():
 
             if SHOW_DEBUG_WINDOW:
                 if marker_corners is not None:
-                    cv2.aruco.drawDetectedMarkers(frame, [marker_corners], np.array([[MARKER_ID]]))
+                    cv2.aruco.drawDetectedMarkers(frame, [marker_corners], np.array([[used_id]]))
 
                 text1 = f"fwd_err={forward_error_m:+.2f}m right_err={right_error_m:+.2f}m"
                 text2 = f"down={down_distance_m:.2f}m xy_err={xy_error_m:.2f}m stable={stable_frames}"
@@ -463,7 +493,7 @@ def main():
                 cv2.putText(frame, f"MARKER LOST {lost_time:.2f}s", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
         if SHOW_DEBUG_WINDOW:
-            cv2.imshow("Challenge1_ZED2i_Aruco", frame)
+            cv2.imshow("Challenge1_ZED_X_Aruco", frame)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
