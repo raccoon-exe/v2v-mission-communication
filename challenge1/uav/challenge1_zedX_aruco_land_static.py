@@ -67,18 +67,21 @@ CRUISE_ALT_M = 2.0              # target takeoff/search altitude
 TAKEOFF_TIMEOUT_S = 20.0
 
 # Positioning / descent logic
-CENTER_TOLERANCE_M = 0.12       # I only descend when XY error is inside this radius
-FINAL_CENTER_TOLERANCE_M = 0.06 # I switch to LAND when tighter than this
-START_DESCENT_IF_DOWN_M = 1.6   # if marker distance is greater than this, I can descend
-FINAL_SWITCH_TO_LAND_DOWN_M = 0.45
+# ULTRA TIGHT: Because the marker isn't moving, we demand pinpoint accuracy!
+CENTER_TOLERANCE_M = 0.08       # Strict XY error tolerance to begin descent
+FINAL_CENTER_TOLERANCE_M = 0.03 # Perfect alignment before triggering TOUCHDOWN sequence
+START_DESCENT_IF_DOWN_M = 1.6   
+FINAL_SWITCH_TO_LAND_DOWN_M = 0.35
 
 # Velocities
-MAX_XY_SPEED_MPS = 0.60
-DESCENT_SPEED_MPS = 0.18  # positive down in BODY_NED
+# CAUTIOUS: Slower speeds to prevent pendulum swinging over a static platform
+MAX_XY_SPEED_MPS = 0.40
+DESCENT_SPEED_MPS = 0.12  
 
 # Proportional control gains
-KP_FORWARD = 0.85
-KP_RIGHT = 0.85
+# SMOOTH: Lower proportional values guarantees it doesn't violently jitter over the mark
+KP_FORWARD = 0.65
+KP_RIGHT = 0.65
 
 # Marker-loss handling
 MARKER_LOST_HOLD_S = 0.50
